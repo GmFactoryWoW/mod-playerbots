@@ -2759,6 +2759,11 @@ void PlayerbotFactory::InitTradeSkills()
     if (!sRandomPlayerbotMgr.IsRandomBot(bot))
         return;
 
+    bool disableTradeSkills = sConfigMgr->GetOption<bool>("AiPlayerbot.DisableTradeSkills", false);
+    if ( disableTradeSkills ) {
+        return;
+    }
+
     uint32 const maxPrimaryTradeSkills =
         std::min<uint32>(2, sWorld->getIntConfig(CONFIG_MAX_PRIMARY_TRADE_SKILL));
 

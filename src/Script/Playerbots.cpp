@@ -81,6 +81,9 @@ public:
 
     void OnPlayerLogin(Player* player) override
     {
+        //GmFactory : Disable sysmessages
+        return;
+
         if (!player->GetSession()->IsBot())
         {
             PlayerbotsMgr::instance().AddPlayerbotData(player, false);
