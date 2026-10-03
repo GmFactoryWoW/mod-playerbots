@@ -91,7 +91,7 @@ public:
             // license especially if you are distributing a repack or hosting a public server
             // e.g. you can replace the URL with your own repository,
             // but it should be publicly accessible and include all modifications you've made
-            if (sPlayerbotAIConfig.enabled)
+            if (sPlayerbotAIConfig.enabled && false)
             {
                 ChatHandler(player->GetSession()).SendSysMessage(
                     "|cff00ff00This server runs with |cff00ccffmod-playerbots|r "
@@ -101,7 +101,9 @@ public:
             if (sPlayerbotAIConfig.enabled || sPlayerbotAIConfig.randomBotAutologin)
             {
                 std::string maxAllowedBotCount = std::to_string(sRandomPlayerbotMgr.GetMaxAllowedBotCount());
-                
+
+                //GmFactory : Disable sysmessages
+                return;
                 ChatHandler(player->GetSession()).SendSysMessage(
                     "|cff00ff00Playerbots:|r The server is configured with " + maxAllowedBotCount + " bots.");
             }
