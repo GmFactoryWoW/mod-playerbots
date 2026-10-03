@@ -1920,32 +1920,18 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
         {
             Field* fields = result->Fetch();
             Candidate c{fields[0].Get<uint32>(), fields[1].Get<uint8>(), fields[2].Get<uint8>(), fields[3].Get<uint8>()};
-            ++scanned;
 
             if (currentBots.contains(c.guid) || queueBurstBots.contains(c.guid) || GetPlayerBot(c.guid))
-            {
-                ++alreadyManaged;
                 continue;
-            }
             if (GetEventValue(c.guid, "add"))
-            {
-                ++alreadyAdding;
                 continue;
-            }
             if (sPlayerbotAIConfig.disableDeathKnightLogin && c.cls == CLASS_DEATH_KNIGHT)
-            {
-                ++disabledClass;
                 continue;
-            }
             if (!allowAnyFaction && (team == TEAM_ALLIANCE) != IsAlliance(c.race))
-            {
-                ++wrongFaction;
                 continue;
-            }
             bool const levelMatches = c.level >= minLevel && c.level <= maxLevel;
             if (!levelMatches)
             {
-                ++wrongLevel;
                 // Both BG and LFG burst bots can be rebuilt to the requested
                 // target level after login. Normal/non-queue callers still
                 // require an exact level match.
@@ -1953,10 +1939,7 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
                     continue;
             }
             if (!CanClassFillQueueRole(c.cls, role))
-            {
-                ++wrongRole;
                 continue;
-            }
 
             if (levelMatches)
                 exactCandidates.push_back(c);
