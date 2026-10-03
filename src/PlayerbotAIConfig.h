@@ -174,6 +174,17 @@ public:
     uint32 minRandomBotsPriceChangeInterval, maxRandomBotsPriceChangeInterval;
     uint32 disabledWithoutRealPlayerLoginDelay, disabledWithoutRealPlayerLogoutDelay;
     bool randomBotJoinLfg;
+    bool queueAutoScale;
+    bool queueAutoScaleLfg;
+    bool queueAutoScaleBg;
+    bool queueAutoScaleBurstOnly;
+    uint32 queueAutoScaleMaxBots;
+    uint32 queueAutoScaleCheckInterval;
+    uint32 queueAutoScaleLoginBatch;
+    uint32 queueAutoScaleLogoutBatch;
+    uint32 queueAutoScaleIdleSeconds;
+    uint32 queueAutoScalePendingSeconds;
+    uint32 queueAutoScaleLfgJoinBatch;
 
     // Professions
     bool enableFishingWithMaster;

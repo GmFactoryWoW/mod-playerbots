@@ -271,6 +271,25 @@ bool PlayerbotAIConfig::Initialize()
     maxRandomBotsPriceChangeInterval =
         sConfigMgr->GetOption<int32>("AiPlayerbot.MaxRandomBotsPriceChangeInterval", 48 * HOUR);
     randomBotJoinLfg = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotJoinLfg", true);
+    queueAutoScale = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScale", false);
+    queueAutoScaleLfg = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScaleLFG", true);
+    queueAutoScaleBg = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScaleBG", true);
+    queueAutoScaleBurstOnly = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScaleBurstOnly", false);
+    queueAutoScaleMaxBots = sConfigMgr->GetOption<uint32>(
+        "AiPlayerbot.QueueAutoScaleMaxBots", std::max<uint32>(maxRandomBots, maxRandomBots + 80));
+    queueAutoScaleMaxBots = std::max<uint32>(queueAutoScaleMaxBots, maxRandomBots);
+    queueAutoScaleCheckInterval =
+        std::max<uint32>(1, sConfigMgr->GetOption<uint32>("AiPlayerbot.QueueAutoScaleCheckInterval", 5));
+    queueAutoScaleLoginBatch =
+        std::max<uint32>(1, sConfigMgr->GetOption<uint32>("AiPlayerbot.QueueAutoScaleLoginBatch", 40));
+    queueAutoScaleLogoutBatch =
+        std::max<uint32>(1, sConfigMgr->GetOption<uint32>("AiPlayerbot.QueueAutoScaleLogoutBatch", 10));
+    queueAutoScaleIdleSeconds =
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.QueueAutoScaleIdleSeconds", 60);
+    queueAutoScalePendingSeconds =
+        std::max<uint32>(10, sConfigMgr->GetOption<uint32>("AiPlayerbot.QueueAutoScalePendingSeconds", 60));
+    queueAutoScaleLfgJoinBatch =
+        std::max<uint32>(1, sConfigMgr->GetOption<uint32>("AiPlayerbot.QueueAutoScaleLFGJoinBatch", 8));
 
     restrictHealerDPS = sConfigMgr->GetOption<bool>("AiPlayerbot.HealerDPSMapRestriction", false);
     LoadList<std::vector<uint32>>(

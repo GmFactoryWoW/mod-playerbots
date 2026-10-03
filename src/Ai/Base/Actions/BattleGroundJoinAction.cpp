@@ -310,8 +310,14 @@ bool BGJoinAction::shouldJoinBg(BattlegroundQueueTypeId queueTypeId, Battlegroun
 
 bool BGJoinAction::isUseful()
 {
+    bool const burstBot =
+        sRandomPlayerbotMgr.IsQueueBurstBot(bot, false, true);
+
+    if (sPlayerbotAIConfig.queueAutoScaleBurstOnly && !burstBot)
+        return false;
+
     // do not try if BG bots disabled
-    if (!sPlayerbotAIConfig.randomBotJoinBG)
+    if (!sPlayerbotAIConfig.randomBotJoinBG && !burstBot)
         return false;
 
     // can't queue while in BG/Arena
@@ -322,8 +328,8 @@ bool BGJoinAction::isUseful()
     if (bot->InBattlegroundQueue())
         return false;
 
-    // do not try right after login (currently not working)
-    if ((time(nullptr) - bot->GetInGameTime()) < 120)
+    // Burst bots exist specifically to fill this queue: do not make them wait 120 s.
+    if ((time(nullptr) - bot->GetInGameTime()) < 120 && !burstBot)
         return false;
 
     // check level
@@ -789,6 +795,48 @@ bool BGStatusAction::Execute(Event event)
         default:
             LOG_ERROR("playerbots", "Unknown BG status!");
             break;
+    }
+
+    bool const burstBot =
+        sRandomPlayerbotMgr.IsQueueBurstBot(bot, false, true);
+
+    if (burstBot && statusid == STATUS_WAIT_JOIN)
+    {
+        BattlegroundQueueTypeId queueTypeId = bot->GetBattlegroundQueueTypeId(QueueSlot);
+        if (queueTypeId == BATTLEGROUND_QUEUE_NONE)
+            return false;
+
+        BattlegroundTypeId bgTypeId = BattlegroundMgr::BGTemplateId(queueTypeId);
+        ArenaType arenaType = ArenaType(BattlegroundMgr::BGArenaType(queueTypeId));
+        uint8 type = arenaType ? uint8(arenaType) : uint8(0);
+        uint8 unk2 = 0x0;
+        uint16 unk = 0x1F90;
+        uint8 action = 0x1;
+
+        BattlegroundQueue& bgQueue = sBattlegroundMgr->GetBattlegroundQueue(queueTypeId);
+        GroupQueueInfo ginfo;
+        if (bgQueue.GetPlayerGroupInfoData(bot->GetGUID(), &ginfo) &&
+            ginfo.IsInvitedToBGInstanceGUID)
+        {
+            if (Battleground* invitedBg = sBattlegroundMgr->GetBattleground(
+                    ginfo.IsInvitedToBGInstanceGUID,
+                    bgTypeId == BATTLEGROUND_AA ? BATTLEGROUND_TYPE_NONE : bgTypeId))
+            {
+                if (arenaType)
+                    bgTypeId = invitedBg->GetBgTypeID();
+            }
+        }
+
+        WorldPacket emptyPacket;
+        bot->GetSession()->HandleCancelMountAuraOpcode(emptyPacket);
+
+        WorldPacket packet(CMSG_BATTLEFIELD_PORT, 20);
+        packet << type << unk2 << uint32(bgTypeId) << unk << action;
+        bot->GetSession()->QueuePacket(new WorldPacket(packet));
+
+        botAI->ResetStrategies(false);
+        context->GetValue<uint32>("bg role")->Set(urand(0, 9));
+        return true;
     }
 
     bool IsRandomBot = sRandomPlayerbotMgr.IsRandomBot(bot);

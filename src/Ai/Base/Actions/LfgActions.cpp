@@ -200,7 +200,10 @@ bool LfgAcceptAction::Execute(Event event)
     // Try accept if already stored
     if (id)
     {
-        if (bot->IsInCombat() || bot->isDead())
+        bool const burstBot =
+            RandomPlayerbotMgr::instance().IsQueueBurstBot(bot, true, false);
+
+        if (!burstBot && (bot->IsInCombat() || bot->isDead()))
         {
             WorldPacket* packet = new WorldPacket(CMSG_LFG_PROPOSAL_RESULT);
             *packet << id << false;
@@ -235,7 +238,10 @@ bool LfgAcceptAction::Execute(Event event)
 
         if (id)
         {
-            if (bot->IsInCombat() || bot->isDead())
+            bool const burstBot =
+                RandomPlayerbotMgr::instance().IsQueueBurstBot(bot, true, false);
+
+            if (!burstBot && (bot->IsInCombat() || bot->isDead()))
             {
                 WorldPacket* packet = new WorldPacket(CMSG_LFG_PROPOSAL_RESULT);
                 *packet << id << false;
@@ -280,7 +286,10 @@ bool LfgLeaveAction::Execute(Event /*event*/)
     // RandomBotJoinLfg off still lets whoever is mid-queue fall through and leave.
     // Config bool is tested first so the O(currentBots) IsRandomBot() scan is skipped
     // whenever the feature is disabled.
-    if (sPlayerbotAIConfig.randomBotJoinLfg && RandomPlayerbotMgr::instance().IsRandomBot(bot))
+    if (sPlayerbotAIConfig.randomBotJoinLfg &&
+        RandomPlayerbotMgr::instance().IsRandomBot(bot) &&
+        (!sPlayerbotAIConfig.queueAutoScaleBurstOnly ||
+         RandomPlayerbotMgr::instance().IsQueueBurstBot(bot, true, false)))
         return false;
 
     WorldPacket* packet = new WorldPacket(CMSG_LFG_LEAVE);
@@ -314,11 +323,20 @@ bool LfgTeleportAction::Execute(Event event)
 
 bool LfgJoinAction::isUseful()
 {
-    if (!sPlayerbotAIConfig.randomBotJoinLfg)
+    bool const burstBot =
+        sRandomPlayerbotMgr.IsQueueBurstBot(bot, true, false);
+
+    if (sPlayerbotAIConfig.queueAutoScaleBurstOnly && !burstBot)
+        return false;
+
+    if (!sPlayerbotAIConfig.randomBotJoinLfg && !burstBot)
     {
         // botAI->ChangeStrategy("-lfg", BOT_STATE_NON_COMBAT);
         return false;
     }
+
+    if (sRandomPlayerbotMgr.IsQueueBurstLfgJoinPending(bot))
+        return false;
 
     if (bot->GetLevel() < 15)
         return false;

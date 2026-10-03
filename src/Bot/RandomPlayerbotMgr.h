@@ -12,6 +12,8 @@
 #include "ObjectGuid.h"
 #include "PlayerbotCommandServer.h"
 #include "PlayerbotMgr.h"
+#include "LFG.h"
+#include <unordered_map>
 #include <unordered_set>
 
 struct BattlegroundInfo
@@ -91,6 +93,21 @@ private:
 class RandomPlayerbotMgr : public PlayerbotHolder
 {
 public:
+    struct QueueBotReservation
+    {
+        TeamId team = TEAM_NEUTRAL;
+        uint8 role = lfg::PLAYER_ROLE_NONE;
+        uint8 minLevel = 1;
+        uint8 maxLevel = 80;
+        uint8 targetLevel = 1;
+        uint32 lfgDungeonId = 0;
+        time_t lastNeeded = 0;
+        time_t reservedAt = 0;
+        time_t joinRequestedAt = 0;
+        bool lfg = false;
+        bool bg = false;
+    };
+
     static RandomPlayerbotMgr& instance()
     {
         static RandomPlayerbotMgr instance;
@@ -154,6 +171,9 @@ public:
     std::map<TeamId, std::vector<uint32>> LfgDungeons;
     void CheckBgQueue();
     void CheckLfgQueue();
+    void BalanceQueueBots();
+    bool IsQueueBurstBot(Player const* bot, bool forLfg = false, bool forBg = false) const;
+    bool IsQueueBurstLfgJoinPending(Player const* bot) const;
     void CheckPlayers();
     void LogBattlegroundInfo();
 
@@ -229,6 +249,15 @@ private:
                          std::string const& data = "");
     void GetBots();
     std::vector<uint32> GetBgBots(uint32 bracket);
+    uint32 EnsureQueueBots(TeamId team, uint8 minLevel, uint8 maxLevel, uint8 role, uint32 count,
+                           bool forLfg, bool forBg, uint32 lfgDungeonId = 0);
+    bool CanClassFillQueueRole(uint8 cls, uint8 role) const;
+    uint8 GetSpecTabForQueueRole(uint8 cls, uint8 role) const;
+    bool IsQueueBotBusy(Player* bot) const;
+    bool QueueBurstBotLfgNow(Player* bot, QueueBotReservation& reservation);
+    void CleanupOrphanedQueueGroups();
+    void CancelQueueBurst(bool cancelLfg, bool cancelBg);
+    void ProcessPendingBurstLfgJoins();
     time_t BgCheckTimer;
     time_t LfgCheckTimer;
     time_t PlayersCheckTimer;
@@ -250,6 +279,9 @@ private:
     std::map<TeamId, std::map<BattlegroundTypeId, std::vector<uint32>>> BattleMastersCache;
     std::unordered_map<uint32, BotEventCache> eventCache;
     std::unordered_set<uint32> currentBots;
+    std::unordered_map<uint32, QueueBotReservation> queueBurstBots;
+    time_t queueBurstLfgJoinWindow = 0;
+    uint32 queueBurstLfgJoinCount = 0;
     uint32 playersLevel;
 
     // Account lists

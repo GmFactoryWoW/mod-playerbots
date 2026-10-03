@@ -23,6 +23,7 @@
 #include "NewRpgInfo.h"
 #include "NewRpgStrategy.h"
 #include "ObjectGuid.h"
+#include "Opcodes.h"
 #include "PerfMonitor.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
@@ -39,6 +40,7 @@
 #include "TravelMgr.h"
 #include "Unit.h"
 #include "World.h"
+#include "WorldPacket.h"
 #include "WorldSessionMgr.h"
 #include <algorithm>
 #include <boost/thread/thread.hpp>
@@ -328,9 +330,20 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     uint32 updateIntervalTurboBoost = _isBotInitializing ? 1 : sPlayerbotAIConfig.randomBotUpdateInterval;
     SetNextCheckDelay(updateIntervalTurboBoost * (onlineBotFocus + 25) * 10);
 
+    // Queue autoscaling is allowed to reserve bots above the normal bot_count,
+    // but never above QueueAutoScaleMaxBots. AddRandomBots() itself still uses
+    // the normal bot_count and therefore cannot accidentally grow the normal
+    // world population to the burst ceiling.
+    uint32 effectiveAllowedBotCount = maxAllowedBotCount;
+    if (sPlayerbotAIConfig.queueAutoScale && !queueBurstBots.empty())
+    {
+        effectiveAllowedBotCount = std::max<uint32>(effectiveAllowedBotCount,
+            std::min<uint32>(sPlayerbotAIConfig.queueAutoScaleMaxBots, currentBots.size()));
+    }
+
     PerfMonitorOperation* pmo = sPerfMonitor.start(
         PERF_MON_TOTAL,
-        onlineBotCount < maxAllowedBotCount ? "RandomPlayerbotMgr::Login" : "RandomPlayerbotMgr::UpdateAIInternal");
+        onlineBotCount < effectiveAllowedBotCount ? "RandomPlayerbotMgr::Login" : "RandomPlayerbotMgr::UpdateAIInternal");
 
     bool realPlayerIsLogged = false;
     if (sPlayerbotAIConfig.disabledWithoutRealPlayer)
@@ -378,16 +391,30 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
             sRandomPlayerbotMgr.CheckPlayers();
     }
 
-    if (sPlayerbotAIConfig.randomBotJoinBG /* && !players.empty()*/)
+    if (sPlayerbotAIConfig.randomBotJoinBG ||
+        (sPlayerbotAIConfig.queueAutoScale && sPlayerbotAIConfig.queueAutoScaleBg))
     {
-        if (time(nullptr) > (BgCheckTimer + 35))
+        uint32 interval = sPlayerbotAIConfig.queueAutoScale && sPlayerbotAIConfig.queueAutoScaleBg
+                              ? sPlayerbotAIConfig.queueAutoScaleCheckInterval
+                              : 35;
+        if (time(nullptr) > (BgCheckTimer + interval))
             sRandomPlayerbotMgr.CheckBgQueue();
     }
 
-    if (sPlayerbotAIConfig.randomBotJoinLfg /* && !players.empty()*/)
+    if (sPlayerbotAIConfig.randomBotJoinLfg ||
+        (sPlayerbotAIConfig.queueAutoScale && sPlayerbotAIConfig.queueAutoScaleLfg))
     {
-        if (time(nullptr) > (LfgCheckTimer + 30))
+        uint32 interval = sPlayerbotAIConfig.queueAutoScale && sPlayerbotAIConfig.queueAutoScaleLfg
+                              ? sPlayerbotAIConfig.queueAutoScaleCheckInterval
+                              : 30;
+        if (time(nullptr) > (LfgCheckTimer + interval))
             sRandomPlayerbotMgr.CheckLfgQueue();
+    }
+
+    if (sPlayerbotAIConfig.queueAutoScale)
+    {
+        CleanupOrphanedQueueGroups();
+        BalanceQueueBots();
     }
 
     if (sPlayerbotAIConfig.randomBotAutologin && sPlayerbotAIConfig.randomBotPrintStatsInterval &&
@@ -405,10 +432,10 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     }
     uint32 updateBots = sPlayerbotAIConfig.randomBotsPerInterval * onlineBotFocus / 100;
     uint32 maxNewBots =
-        onlineBotCount < maxAllowedBotCount &&
+        onlineBotCount < effectiveAllowedBotCount &&
                 (sPlayerbotAIConfig.disabledWithoutRealPlayer == false ||
                  (realPlayerIsLogged && DelayLoginBotsTimer != 0 && time(nullptr) >= DelayLoginBotsTimer))
-            ? maxAllowedBotCount - onlineBotCount
+            ? effectiveAllowedBotCount - onlineBotCount
             : 0;
     uint32 loginBots = std::min(sPlayerbotAIConfig.randomBotsPerInterval - updateBots, maxNewBots);
 
@@ -921,8 +948,11 @@ void RandomPlayerbotMgr::CheckBgQueue()
 
     // Process real players and populate Battleground Data with player/queue count
     // Opens a queue for bots to join
+    bool anyRealBgActivity = false;
     for (Player* player : players)
     {
+        if (player && (player->InBattlegroundQueue() || player->InBattleground()))
+            anyRealBgActivity = true;
         // Skip player if not currently in a queue
         if (!player->InBattlegroundQueue())
             continue;
@@ -1011,6 +1041,9 @@ void RandomPlayerbotMgr::CheckBgQueue()
             }
         }
     }
+
+    if (!anyRealBgActivity)
+        CancelQueueBurst(false, true);
 
     // Process player bots
     for (auto& [guid, bot] : playerBots)
@@ -1248,6 +1281,162 @@ void RandomPlayerbotMgr::LogBattlegroundInfo()
         }
     }
     LOG_DEBUG("playerbots", "BG Queue check finished");
+
+    if (!sPlayerbotAIConfig.queueAutoScale || !sPlayerbotAIConfig.queueAutoScaleBg)
+        return;
+
+    for (auto const& [queueTypeRaw, brackets] : BattlegroundData)
+    {
+        BattlegroundQueueTypeId queueTypeId = static_cast<BattlegroundQueueTypeId>(queueTypeRaw);
+        if (BattlegroundMgr::BGArenaType(queueTypeId))
+            continue;
+
+        BattlegroundTypeId bgTypeId = sBattlegroundMgr->BGTemplateId(queueTypeId);
+        Battleground* bgTemplate = sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId);
+        if (!bgTemplate)
+            continue;
+
+        // Fill the real battleground capacity, not just the minimum start size.
+        // AV for example is 40 players per team.
+        uint32 targetPerTeam = bgTemplate->GetMaxPlayersPerTeam();
+        if (!targetPerTeam)
+            targetPerTeam = bgTemplate->GetMinPlayersPerTeam();
+        if (!targetPerTeam)
+            continue;
+
+        for (auto const& [bracketRaw, info] : brackets)
+        {
+            // Keep autoscaling after the battleground has started. Once all
+            // queued players are invited/inside, activeBgQueue becomes 0 even
+            // though an under-filled instance is still running. BGJoinAction
+            // already considers bgInstanceCount when deciding whether a bot
+            // should join, so the population layer must do the same.
+            if ((!info.activeBgQueue && !info.bgInstanceCount) || !info.minLevel || !info.maxLevel)
+                continue;
+
+            uint32 alliance = info.bgAlliancePlayerCount + info.bgAllianceBotCount;
+            uint32 horde = info.bgHordePlayerCount + info.bgHordeBotCount;
+
+            uint32 needAlliance = alliance < targetPerTeam ? targetPerTeam - alliance : 0;
+            uint32 needHorde = horde < targetPerTeam ? targetPerTeam - horde : 0;
+
+            if (!needAlliance && !needHorde)
+                continue;
+
+            uint32 room = 0;
+            if (currentBots.size() < sPlayerbotAIConfig.queueAutoScaleMaxBots)
+                room = sPlayerbotAIConfig.queueAutoScaleMaxBots - currentBots.size();
+
+            uint32 totalMissing = needAlliance + needHorde;
+            uint32 remaining = sPlayerbotAIConfig.queueAutoScaleBurstOnly
+                                   ? std::min<uint32>(totalMissing, room)
+                                   : std::min<uint32>(sPlayerbotAIConfig.queueAutoScaleLoginBatch, room);
+
+            if (!remaining)
+                continue;
+
+            // Fair first-pass split. Previously Alliance was always processed
+            // first and could consume the entire batch every cycle.
+            uint32 budgetAlliance = 0;
+            uint32 budgetHorde = 0;
+
+            if (needAlliance && needHorde)
+            {
+                budgetAlliance = std::min<uint32>(needAlliance, (remaining + 1) / 2);
+                budgetHorde = std::min<uint32>(needHorde, remaining / 2);
+            }
+            else if (needAlliance)
+                budgetAlliance = std::min<uint32>(needAlliance, remaining);
+            else
+                budgetHorde = std::min<uint32>(needHorde, remaining);
+
+            if (budgetAlliance)
+                EnsureQueueBots(
+                    TEAM_ALLIANCE, info.minLevel, info.maxLevel, lfg::PLAYER_ROLE_NONE,
+                    budgetAlliance, false, true);
+
+            if (budgetHorde)
+                EnsureQueueBots(
+                    TEAM_HORDE, info.minLevel, info.maxLevel, lfg::PLAYER_ROLE_NONE,
+                    budgetHorde, false, true);
+        }
+    }
+}
+
+void RandomPlayerbotMgr::ProcessPendingBurstLfgJoins()
+{
+    for (auto& [guid, reservation] : queueBurstBots)
+    {
+        if (!reservation.lfg)
+            continue;
+        Player* bot = GetPlayerBot(guid);
+        if (!bot || !bot->IsInWorld())
+            continue;
+        if (sLFGMgr->GetState(bot->GetGUID()) != lfg::LFG_STATE_NONE)
+            continue;
+        if (!sPlayerbotAIConfig.queueAutoScaleBurstOnly &&
+            reservation.joinRequestedAt && time(nullptr) < reservation.joinRequestedAt + 15)
+            continue;
+        if (!QueueBurstBotLfgNow(bot, reservation) &&
+            queueBurstLfgJoinWindow == time(nullptr) &&
+            queueBurstLfgJoinCount >= sPlayerbotAIConfig.queueAutoScaleLfgJoinBatch)
+            break;
+    }
+}
+
+void RandomPlayerbotMgr::CancelQueueBurst(bool cancelLfg, bool cancelBg)
+{
+    for (auto it = queueBurstBots.begin(); it != queueBurstBots.end(); )
+    {
+        uint32 guid = it->first;
+        QueueBotReservation const reservation = it->second;
+        if ((reservation.lfg && !cancelLfg) || (reservation.bg && !cancelBg))
+        {
+            ++it;
+            continue;
+        }
+
+        Player* bot = GetPlayerBot(guid);
+        if (reservation.lfg && cancelLfg && bot)
+        {
+            lfg::LfgState state = sLFGMgr->GetState(bot->GetGUID());
+            if (state >= lfg::LFG_STATE_DUNGEON && state != lfg::LFG_STATE_FINISHED_DUNGEON)
+            {
+                ++it;
+                continue;
+            }
+            if (state != lfg::LFG_STATE_NONE)
+            {
+                sLFGMgr->LeaveLfg(bot->GetGUID());
+                sLFGMgr->LeaveAllLfgQueues(bot->GetGUID(), true,
+                    bot->GetGroup() ? bot->GetGroup()->GetGUID() : ObjectGuid::Empty);
+            }
+        }
+
+        if (reservation.bg && cancelBg && bot)
+        {
+            if (bot->InBattleground())
+            {
+                ++it;
+                continue;
+            }
+            for (uint8 slot = 0; slot < PLAYER_MAX_BATTLEGROUND_QUEUES; ++slot)
+            {
+                BattlegroundQueueTypeId q = bot->GetBattlegroundQueueTypeId(slot);
+                if (q == BATTLEGROUND_QUEUE_NONE)
+                    continue;
+                bot->RemoveBattlegroundQueueId(q);
+                sBattlegroundMgr->GetBattlegroundQueue(q).RemovePlayer(bot->GetGUID(), true);
+            }
+        }
+
+        SetEventValue(guid, "add", 0, 0);
+        SetEventValue(guid, "randomize", 0, 0);
+        if (!bot)
+            currentBots.erase(guid);
+
+        it = queueBurstBots.erase(it);
+    }
 }
 
 void RandomPlayerbotMgr::CheckLfgQueue()
@@ -1261,6 +1450,42 @@ void RandomPlayerbotMgr::CheckLfgQueue()
     LfgDungeons[TEAM_ALLIANCE].clear();
     LfgDungeons[TEAM_HORDE].clear();
 
+    bool const allowCrossFactionLfg =
+        sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_GROUP) &&
+        sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_CHAT);
+    bool anyRealLfgQueue = false;
+
+    struct TeamDemand
+    {
+        uint32 total = 0;
+        uint32 tanks = 0;
+        uint32 heals = 0;
+        uint32 dps = 0;
+        uint8 minLevel = 0;
+        uint8 maxLevel = 0;
+        uint8 raidLevel = 0;
+        uint32 targetPlayers = 0;
+        uint32 targetTanks = 0;
+        uint32 targetHeals = 0;
+        uint32 targetDps = 0;
+    };
+
+    // LFG demand must be tracked per activity, not only per faction.
+    // Otherwise two simultaneous raids of the same faction are collapsed into
+    // one target and bots queued for one raid are counted for the other.
+    struct LfgDemandKey
+    {
+        TeamId team = TEAM_NEUTRAL;
+        uint32 dungeonId = 0;
+
+        bool operator<(LfgDemandKey const& other) const
+        {
+            return team < other.team || (team == other.team && dungeonId < other.dungeonId);
+        }
+    };
+
+    std::map<LfgDemandKey, TeamDemand> demand;
+
     for (std::vector<Player*>::iterator i = players.begin(); i != players.end(); ++i)
     {
         Player* player = *i;
@@ -1273,19 +1498,812 @@ void RandomPlayerbotMgr::CheckLfgQueue()
         lfg::LfgState gState = sLFGMgr->GetState(guid);
         if (gState != lfg::LFG_STATE_NONE && gState < lfg::LFG_STATE_DUNGEON)
         {
+            anyRealLfgQueue = true;
+            uint8 roles = sLFGMgr->GetRoles(player->GetGUID());
+
             lfg::LfgDungeonSet const& dList = sLFGMgr->GetSelectedDungeons(player->GetGUID());
+
             for (lfg::LfgDungeonSet::const_iterator itr = dList.begin(); itr != dList.end(); ++itr)
             {
                 lfg::LFGDungeonData const* dungeon = sLFGMgr->GetLFGDungeon(*itr);
                 if (!dungeon)
                     continue;
 
-                LfgDungeons[player->GetTeamId()].push_back(dungeon->id);
+                TeamId demandTeam = allowCrossFactionLfg ? TEAM_NEUTRAL : player->GetTeamId();
+                LfgDemandKey key{demandTeam, dungeon->id};
+                TeamDemand& td = demand[key];
+
+                ++td.total;
+                td.minLevel = td.minLevel ? std::min<uint8>(td.minLevel, player->GetLevel()) : player->GetLevel();
+                td.maxLevel = std::max<uint8>(td.maxLevel, player->GetLevel());
+
+                if (roles & lfg::PLAYER_ROLE_TANK)
+                    ++td.tanks;
+                else if (roles & lfg::PLAYER_ROLE_HEALER)
+                    ++td.heals;
+                else
+                    ++td.dps;
+
+                // Ask AzerothCore for the requirements of this exact activity.
+                // Using the player's whole selected set here would merge
+                // independent raids back together.
+                lfg::LfgDungeonSet oneDungeon;
+                oneDungeon.insert(dungeon->id);
+                lfg::LfgRoleRequirements requirements = sLFGMgr->GetLfgRoleRequirements(oneDungeon);
+                if (requirements.players)
+                {
+                    td.targetPlayers = requirements.players;
+                    td.targetTanks = requirements.tanks;
+                    td.targetHeals = requirements.healers;
+                    td.targetDps = requirements.dps;
+                }
+
+                if (dungeon->type == lfg::LFG_TYPE_RAID)
+                {
+                    uint8 raidLevel = 60;
+                    if (dungeon->expansion == 1)
+                        raidLevel = 70;
+                    else if (dungeon->expansion >= 2)
+                        raidLevel = 80;
+
+                    td.raidLevel = raidLevel;
+                    td.minLevel = raidLevel;
+                    td.maxLevel = raidLevel;
+                }
+                else
+                {
+                    uint8 dungeonMin = dungeon->minlevel ? dungeon->minlevel : player->GetLevel();
+                    uint8 dungeonMax = dungeon->maxlevel ? dungeon->maxlevel : player->GetLevel();
+                    td.minLevel = td.minLevel ? std::min<uint8>(td.minLevel, dungeonMin) : dungeonMin;
+                    td.maxLevel = std::max<uint8>(td.maxLevel, dungeonMax);
+                }
+
+                // Keep the legacy list populated for non-burst code paths.
+                if (allowCrossFactionLfg)
+                {
+                    if (std::find(LfgDungeons[TEAM_ALLIANCE].begin(), LfgDungeons[TEAM_ALLIANCE].end(), dungeon->id) ==
+                        LfgDungeons[TEAM_ALLIANCE].end())
+                        LfgDungeons[TEAM_ALLIANCE].push_back(dungeon->id);
+                    if (std::find(LfgDungeons[TEAM_HORDE].begin(), LfgDungeons[TEAM_HORDE].end(), dungeon->id) ==
+                        LfgDungeons[TEAM_HORDE].end())
+                        LfgDungeons[TEAM_HORDE].push_back(dungeon->id);
+                }
+                else
+                {
+                    std::vector<uint32>& teamDungeons = LfgDungeons[player->GetTeamId()];
+                    if (std::find(teamDungeons.begin(), teamDungeons.end(), dungeon->id) == teamDungeons.end())
+                        teamDungeons.push_back(dungeon->id);
+                }
             }
         }
     }
 
-    LOG_DEBUG("playerbots", "LFG Queue check finished");
+    if (!anyRealLfgQueue)
+    {
+        CancelQueueBurst(true, false);
+        return;
+    }
+
+    // Count already queued random bots so a new check does not reserve another
+    // tank/healer while the previous burst bot is already waiting in LFG.
+    for (auto const& [guid, bot] : playerBots)
+    {
+        (void)guid;
+        if (!bot || !bot->IsInWorld() || !IsRandomBot(bot))
+            continue;
+
+        if (sPlayerbotAIConfig.queueAutoScaleBurstOnly &&
+            !IsQueueBurstBot(bot, true, false))
+            continue;
+
+        lfg::LfgState state = sLFGMgr->GetState(bot->GetGUID());
+        if (state == lfg::LFG_STATE_NONE || state >= lfg::LFG_STATE_DUNGEON)
+            continue;
+
+        // A queued bot may satisfy exactly one autoscale demand. Burst bots are
+        // pinned to the activity stored in their reservation so another raid
+        // cannot accidentally count them as part of its population.
+        lfg::LfgDungeonSet const& botDungeons = sLFGMgr->GetSelectedDungeons(bot->GetGUID());
+        TeamId demandTeam = allowCrossFactionLfg ? TEAM_NEUTRAL : bot->GetTeamId();
+        uint32 demandDungeonId = 0;
+
+        auto reservationItr = queueBurstBots.find(guid.GetCounter());
+        if (reservationItr != queueBurstBots.end() && reservationItr->second.lfg &&
+            reservationItr->second.lfgDungeonId)
+        {
+            uint32 reservedDungeonId = reservationItr->second.lfgDungeonId;
+            if (botDungeons.find(reservedDungeonId) != botDungeons.end() &&
+                demand.find(LfgDemandKey{demandTeam, reservedDungeonId}) != demand.end())
+                demandDungeonId = reservedDungeonId;
+        }
+
+        if (!demandDungeonId)
+        {
+            for (uint32 dungeonId : botDungeons)
+            {
+                if (demand.find(LfgDemandKey{demandTeam, dungeonId}) != demand.end())
+                {
+                    demandDungeonId = dungeonId;
+                    break;
+                }
+            }
+        }
+
+        if (!demandDungeonId)
+            continue;
+
+        TeamDemand& td = demand[LfgDemandKey{demandTeam, demandDungeonId}];
+
+        if (td.raidLevel && bot->GetLevel() != td.raidLevel)
+            continue;
+
+        uint8 roles = sLFGMgr->GetRoles(bot->GetGUID());
+        if (!roles)
+        {
+            PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+            if (ai && ai->IsTank(bot, false))
+                roles = lfg::PLAYER_ROLE_TANK;
+            else if (ai && ai->IsHeal(bot, false))
+                roles = lfg::PLAYER_ROLE_HEALER;
+            else
+                roles = lfg::PLAYER_ROLE_DAMAGE;
+        }
+
+        if (roles & lfg::PLAYER_ROLE_TANK)
+            ++td.tanks;
+        else if (roles & lfg::PLAYER_ROLE_HEALER)
+            ++td.heals;
+        else
+            ++td.dps;
+    }
+
+    // Refresh only reservations whose exact activity is still requested.
+    // Previously every LFG reservation was kept alive while any real LFG
+    // player existed, leaving stale raid reservations around indefinitely.
+    if (anyRealLfgQueue)
+    {
+        time_t now = time(nullptr);
+        for (auto& [guid, reservation] : queueBurstBots)
+        {
+            if (!reservation.lfg)
+                continue;
+
+            TeamId reservationTeam = allowCrossFactionLfg ? TEAM_NEUTRAL : reservation.team;
+            if (reservation.lfgDungeonId &&
+                demand.find(LfgDemandKey{reservationTeam, reservation.lfgDungeonId}) != demand.end())
+            {
+                reservation.lastNeeded = now;
+            }
+        }
+    }
+
+    if (sPlayerbotAIConfig.queueAutoScale && sPlayerbotAIConfig.queueAutoScaleLfg)
+    {
+        ProcessPendingBurstLfgJoins();
+        uint32 room = currentBots.size() < sPlayerbotAIConfig.queueAutoScaleMaxBots
+                          ? sPlayerbotAIConfig.queueAutoScaleMaxBots - currentBots.size()
+                          : 0;
+        uint32 remaining = sPlayerbotAIConfig.queueAutoScaleBurstOnly
+                               ? room
+                               : std::min<uint32>(sPlayerbotAIConfig.queueAutoScaleLoginBatch, room);
+        for (auto& [key, td] : demand)
+        {
+            if (!remaining || !td.total || !td.targetPlayers)
+                continue;
+
+            TeamId team = key.team;
+            uint32 dungeonId = key.dungeonId;
+
+            uint32 needTank = td.targetTanks > td.tanks ? td.targetTanks - td.tanks : 0;
+            uint32 needHeal = td.targetHeals > td.heals ? td.targetHeals - td.heals : 0;
+            uint32 needDps = td.targetDps > td.dps ? td.targetDps - td.dps : 0;
+            uint8 minLevel = td.minLevel ? td.minLevel : sPlayerbotAIConfig.randomBotMinLevel;
+            uint8 maxLevel = td.maxLevel ? td.maxLevel : sPlayerbotAIConfig.randomBotMaxLevel;
+
+            if (needTank && remaining)
+            {
+                uint32 added = EnsureQueueBots(team, minLevel, maxLevel, lfg::PLAYER_ROLE_TANK,
+                    std::min(needTank, remaining), true, false, dungeonId);
+                remaining -= std::min(remaining, added);
+            }
+
+            if (needHeal && remaining)
+            {
+                uint32 added = EnsureQueueBots(team, minLevel, maxLevel, lfg::PLAYER_ROLE_HEALER,
+                    std::min(needHeal, remaining), true, false, dungeonId);
+                remaining -= std::min(remaining, added);
+            }
+
+            if (needDps && remaining)
+            {
+                uint32 added = EnsureQueueBots(team, minLevel, maxLevel, lfg::PLAYER_ROLE_DAMAGE,
+                    std::min(needDps, remaining), true, false, dungeonId);
+                remaining -= std::min(remaining, added);
+            }
+        }
+    }
+}
+
+bool RandomPlayerbotMgr::CanClassFillQueueRole(uint8 cls, uint8 role) const
+{
+    if (role == lfg::PLAYER_ROLE_NONE || role == lfg::PLAYER_ROLE_DAMAGE)
+        return true;
+
+    if (role == lfg::PLAYER_ROLE_TANK)
+    {
+        return cls == CLASS_WARRIOR || cls == CLASS_PALADIN || cls == CLASS_DRUID ||
+               cls == CLASS_DEATH_KNIGHT;
+    }
+
+    if (role == lfg::PLAYER_ROLE_HEALER)
+    {
+        return cls == CLASS_PRIEST || cls == CLASS_PALADIN || cls == CLASS_DRUID || cls == CLASS_SHAMAN;
+    }
+
+    return false;
+}
+
+uint8 RandomPlayerbotMgr::GetSpecTabForQueueRole(uint8 cls, uint8 role) const
+{
+    if (role == lfg::PLAYER_ROLE_TANK)
+    {
+        switch (cls)
+        {
+            case CLASS_WARRIOR: return 2;       // Protection
+            case CLASS_PALADIN: return 1;       // Protection
+            case CLASS_DRUID: return 1;         // Feral
+            case CLASS_DEATH_KNIGHT: return 0;  // Blood
+            default: return 255;
+        }
+    }
+
+    if (role == lfg::PLAYER_ROLE_HEALER)
+    {
+        switch (cls)
+        {
+            case CLASS_PRIEST: return 0;  // Discipline
+            case CLASS_PALADIN: return 0; // Holy
+            case CLASS_DRUID: return 2;   // Restoration
+            case CLASS_SHAMAN: return 2;  // Restoration
+            default: return 255;
+        }
+    }
+
+    if (role == lfg::PLAYER_ROLE_DAMAGE)
+    {
+        switch (cls)
+        {
+            case CLASS_PRIEST: return 2;        // Shadow
+            case CLASS_PALADIN: return 2;       // Retribution
+            case CLASS_DEATH_KNIGHT: return 1;  // Frost
+            default: return 0;
+        }
+    }
+
+    return 255;
+}
+
+uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 maxLevel, uint8 role, uint32 count,
+                                           bool forLfg, bool forBg, uint32 lfgDungeonId)
+{
+    if (!count || currentBots.size() >= sPlayerbotAIConfig.queueAutoScaleMaxBots)
+        return 0;
+
+    bool const allowAnyFaction =
+        forLfg && sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_GROUP) &&
+        sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_CHAT);
+
+    // Do not reserve duplicates while a previously selected burst bot is still
+    // loading and has not entered LFG/BG yet. Once it is actually queued the
+    // caller already sees it in the normal queue counts.
+    uint32 pending = 0;
+    time_t const now = time(nullptr);
+    for (auto itr = queueBurstBots.begin(); itr != queueBurstBots.end(); )
+    {
+        uint32 guid = itr->first;
+        QueueBotReservation& reservation = itr->second;
+
+        if (reservation.team != team || reservation.role != role || reservation.lfg != forLfg ||
+            reservation.bg != forBg ||
+            (forLfg && reservation.lfgDungeonId != lfgDungeonId))
+        {
+            ++itr;
+            continue;
+        }
+
+        Player* pendingBot = GetPlayerBot(guid);
+        bool enteredQueue = false;
+        if (pendingBot)
+        {
+            if (forBg)
+                enteredQueue = pendingBot->InBattlegroundQueue() || pendingBot->InBattleground();
+            else if (forLfg)
+            {
+                lfg::LfgState state = sLFGMgr->GetState(pendingBot->GetGUID());
+                enteredQueue = state != lfg::LFG_STATE_NONE;
+            }
+        }
+
+        if (enteredQueue)
+        {
+            ++itr;
+            continue;
+        }
+
+        // A reservation that never reaches the queue must not block this role
+        // forever. This can happen after a failed login, failed LFG join,
+        // role mismatch or AI action that never fires.
+        if (reservation.reservedAt &&
+            now >= reservation.reservedAt + sPlayerbotAIConfig.queueAutoScalePendingSeconds)
+        {
+            SetEventValue(guid, "add", 0, 0);
+            SetEventValue(guid, "randomize", 0, 0);
+
+            if (!pendingBot)
+                currentBots.erase(guid);
+
+            itr = queueBurstBots.erase(itr);
+            continue;
+        }
+
+        ++pending;
+        ++itr;
+    }
+
+    if (pending >= count)
+        return 0;
+
+    count -= pending;
+
+    if (!forLfg)
+    {
+        minLevel = std::max<uint8>(minLevel, sPlayerbotAIConfig.randomBotMinLevel);
+        maxLevel = std::min<uint8>(maxLevel, sPlayerbotAIConfig.randomBotMaxLevel);
+        if (minLevel > maxLevel)
+            std::swap(minLevel, maxLevel);
+    }
+
+    struct Candidate
+    {
+        uint32 guid;
+        uint8 race;
+        uint8 cls;
+        uint8 level;
+    };
+
+    std::vector<Candidate> exactCandidates;
+    std::vector<Candidate> fallbackCandidates;
+
+    // Normal population management intentionally uses the RNDbot account
+    // subset. Queue burst population is different: it must be able to use any
+    // random-bot character when the preferred subset cannot supply the needed
+    // faction/bracket/role. This is especially important for 40v40 BGs and
+    // raid tanks/healers, where the RNDbot subset can be exhausted quickly.
+    std::vector<uint32> accountsToScan = rndBotTypeAccounts;
+    if (forBg || forLfg)
+    {
+        for (uint32 accountId : sPlayerbotAIConfig.randomBotAccounts)
+        {
+            if (std::find(accountsToScan.begin(), accountsToScan.end(), accountId) == accountsToScan.end())
+                accountsToScan.push_back(accountId);
+        }
+    }
+
+    for (uint32 accountId : accountsToScan)
+    {
+        QueryResult result = CharacterDatabase.Query(
+            "SELECT guid, race, class, level FROM characters WHERE account = {} AND deleteDate IS NULL",
+            accountId);
+        if (!result)
+            continue;
+
+        do
+        {
+            Field* fields = result->Fetch();
+            Candidate c{fields[0].Get<uint32>(), fields[1].Get<uint8>(), fields[2].Get<uint8>(), fields[3].Get<uint8>()};
+            ++scanned;
+
+            if (currentBots.contains(c.guid) || queueBurstBots.contains(c.guid) || GetPlayerBot(c.guid))
+            {
+                ++alreadyManaged;
+                continue;
+            }
+            if (GetEventValue(c.guid, "add"))
+            {
+                ++alreadyAdding;
+                continue;
+            }
+            if (sPlayerbotAIConfig.disableDeathKnightLogin && c.cls == CLASS_DEATH_KNIGHT)
+            {
+                ++disabledClass;
+                continue;
+            }
+            if (!allowAnyFaction && (team == TEAM_ALLIANCE) != IsAlliance(c.race))
+            {
+                ++wrongFaction;
+                continue;
+            }
+            bool const levelMatches = c.level >= minLevel && c.level <= maxLevel;
+            if (!levelMatches)
+            {
+                ++wrongLevel;
+                // Both BG and LFG burst bots can be rebuilt to the requested
+                // target level after login. Normal/non-queue callers still
+                // require an exact level match.
+                if (!forBg && !forLfg)
+                    continue;
+            }
+            if (!CanClassFillQueueRole(c.cls, role))
+            {
+                ++wrongRole;
+                continue;
+            }
+
+            if (levelMatches)
+                exactCandidates.push_back(c);
+            else
+                fallbackCandidates.push_back(c);
+        } while (result->NextRow());
+    }
+
+    if (exactCandidates.empty() && fallbackCandidates.empty())
+        return 0;
+
+    std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count());
+    std::shuffle(exactCandidates.begin(), exactCandidates.end(), rng);
+    std::shuffle(fallbackCandidates.begin(), fallbackCandidates.end(), rng);
+
+    std::vector<Candidate> candidates;
+    candidates.reserve(exactCandidates.size() + fallbackCandidates.size());
+    candidates.insert(candidates.end(), exactCandidates.begin(), exactCandidates.end());
+    candidates.insert(candidates.end(), fallbackCandidates.begin(), fallbackCandidates.end());
+
+    uint32 room = sPlayerbotAIConfig.queueAutoScaleMaxBots - currentBots.size();
+    uint32 wanted = std::min<uint32>(count, room);
+    uint32 added = 0;
+    uint8 targetLevel = static_cast<uint8>((static_cast<uint32>(minLevel) + maxLevel) / 2);
+
+    if (forLfg && minLevel == maxLevel)
+        targetLevel = minLevel;
+
+    for (Candidate const& c : candidates)
+    {
+        if (added >= wanted)
+            break;
+
+        SetEventValue(c.guid, "add", 1, sPlayerbotAIConfig.permanentlyInWorldTime);
+        SetEventValue(c.guid, "logout", 0, 0);
+        // Keep the selected role/spec stable for the lifetime of the burst bot.
+        SetEventValue(c.guid, "randomize", 1, sPlayerbotAIConfig.permanentlyInWorldTime);
+        currentBots.insert(c.guid);
+
+        QueueBotReservation reservation;
+        reservation.team = team;
+        reservation.role = role;
+        reservation.minLevel = minLevel;
+        reservation.maxLevel = maxLevel;
+        reservation.targetLevel = targetLevel;
+        reservation.lfgDungeonId = forLfg ? lfgDungeonId : 0;
+        reservation.lastNeeded = time(nullptr);
+        reservation.reservedAt = reservation.lastNeeded;
+        reservation.lfg = forLfg;
+        reservation.bg = forBg;
+        queueBurstBots[c.guid] = reservation;
+        ++added;
+    }
+
+    return added;
+}
+
+bool RandomPlayerbotMgr::QueueBurstBotLfgNow(Player* bot, QueueBotReservation& reservation)
+{
+    if (!bot || !bot->GetSession() || !reservation.lfg || reservation.role == lfg::PLAYER_ROLE_NONE)
+        return false;
+
+    if (sLFGMgr->GetState(bot->GetGUID()) != lfg::LFG_STATE_NONE)
+        return true;
+
+    time_t const now = time(nullptr);
+    if (queueBurstLfgJoinWindow != now)
+    {
+        queueBurstLfgJoinWindow = now;
+        queueBurstLfgJoinCount = 0;
+    }
+    if (queueBurstLfgJoinCount >= sPlayerbotAIConfig.queueAutoScaleLfgJoinBatch)
+        return false;
+
+    lfg::LfgDungeonSet list;
+
+    // Burst reservations are pinned to one exact LFG activity. This prevents a
+    // bot reserved for AQ20 from joining AQ40 (or vice versa) simply because
+    // both raids are currently present in the faction-wide LfgDungeons list.
+    if (reservation.lfgDungeonId)
+    {
+        LFGDungeonEntry const* dungeon = sLFGDungeonStore.LookupEntry(reservation.lfgDungeonId);
+        if (dungeon &&
+            (dungeon->TypeID == lfg::LFG_TYPE_RANDOM ||
+             dungeon->TypeID == lfg::LFG_TYPE_DUNGEON ||
+             dungeon->TypeID == lfg::LFG_TYPE_HEROIC ||
+             dungeon->TypeID == lfg::LFG_TYPE_RAID))
+        {
+            uint8 level = bot->GetLevel();
+            bool levelOk = !dungeon->MinLevel || (level >= dungeon->MinLevel && level <= dungeon->MaxLevel);
+            bool oldDungeonTooHigh =
+                dungeon->TypeID == lfg::LFG_TYPE_DUNGEON && level > dungeon->MinLevel + 10;
+
+            if (levelOk && !oldDungeonTooHigh)
+                list.insert(dungeon->ID);
+        }
+    }
+    else
+    {
+        // Compatibility fallback for reservations created before this patch.
+        std::vector<uint32> const& configuredDungeons = LfgDungeons[bot->GetTeamId()];
+        for (uint32 dungeonId : configuredDungeons)
+        {
+            LFGDungeonEntry const* dungeon = sLFGDungeonStore.LookupEntry(dungeonId);
+            if (!dungeon)
+                continue;
+            if (dungeon->TypeID != lfg::LFG_TYPE_RANDOM && dungeon->TypeID != lfg::LFG_TYPE_DUNGEON &&
+                dungeon->TypeID != lfg::LFG_TYPE_HEROIC && dungeon->TypeID != lfg::LFG_TYPE_RAID)
+                continue;
+
+            uint8 level = bot->GetLevel();
+            if (dungeon->MinLevel && (level < dungeon->MinLevel || level > dungeon->MaxLevel))
+                continue;
+            if (level > dungeon->MinLevel + 10 && dungeon->TypeID == lfg::LFG_TYPE_DUNGEON)
+                continue;
+            list.insert(dungeon->ID);
+        }
+    }
+
+    if (list.empty())
+        return false;
+
+    PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+    if (!ai)
+        return false;
+
+    uint32 roleMask = reservation.role;
+    std::string const gearScore = std::to_string(ai->GetEquipGearScore(bot));
+
+    if (sPlayerbotAIConfig.queueAutoScaleBurstOnly)
+    {
+        reservation.joinRequestedAt = now;
+        ++queueBurstLfgJoinCount;
+
+        sLFGMgr->JoinLfg(bot, uint8(roleMask), list, gearScore);
+        bot->UpdateLFGChannel();
+
+        lfg::LfgState state = sLFGMgr->GetState(bot->GetGUID());
+        if (state == lfg::LFG_STATE_NONE)
+            return false;
+
+        return true;
+    }
+
+    WorldPacket* data = new WorldPacket(CMSG_LFG_JOIN);
+    *data << roleMask;
+    *data << bool(false);
+    *data << bool(false);
+    *data << uint8(list.size());
+    for (uint32 dungeon : list)
+        *data << dungeon;
+    *data << uint8(3) << uint8(0) << uint8(0) << uint8(0);
+    *data << gearScore;
+
+    bot->GetSession()->QueuePacket(data);
+    reservation.joinRequestedAt = now;
+    ++queueBurstLfgJoinCount;
+
+    return true;
+}
+
+bool RandomPlayerbotMgr::IsQueueBurstLfgJoinPending(Player const* bot) const
+{
+    if (!bot)
+        return false;
+
+    auto itr = queueBurstBots.find(bot->GetGUID().GetCounter());
+    if (itr == queueBurstBots.end() || !itr->second.lfg || !itr->second.joinRequestedAt)
+        return false;
+
+    if (sLFGMgr->GetState(bot->GetGUID()) != lfg::LFG_STATE_NONE)
+        return false;
+
+    return time(nullptr) < itr->second.joinRequestedAt + 15;
+}
+
+bool RandomPlayerbotMgr::IsQueueBotBusy(Player* bot) const
+{
+    if (!bot)
+        return false;
+
+    if (bot->IsInCombat() || bot->InBattleground() || bot->InArena() || bot->InBattlegroundQueue())
+        return true;
+
+    if (bot->GetGroup())
+        return true;
+
+    lfg::LfgState state = sLFGMgr->GetState(bot->GetGUID());
+    return state != lfg::LFG_STATE_NONE && state != lfg::LFG_STATE_FINISHED_DUNGEON;
+}
+
+bool RandomPlayerbotMgr::IsQueueBurstBot(Player const* bot, bool forLfg, bool forBg) const
+{
+    if (!bot)
+        return false;
+
+    auto itr = queueBurstBots.find(bot->GetGUID().GetCounter());
+    if (itr == queueBurstBots.end())
+        return false;
+
+    if (forLfg && !itr->second.lfg)
+        return false;
+    if (forBg && !itr->second.bg)
+        return false;
+
+    return true;
+}
+
+void RandomPlayerbotMgr::CleanupOrphanedQueueGroups()
+{
+    // Queue-created groups can survive after every real player has left.
+    // Bots then keep group/instance slots occupied because grouped bots are
+    // considered busy by the autoscale cleanup.
+    std::unordered_set<uint32> processedGroups;
+
+    for (auto const& [guid, bot] : playerBots)
+    {
+        (void)guid;
+
+        if (!bot || !bot->IsInWorld())
+            continue;
+
+        Group* group = bot->GetGroup();
+        if (!group)
+            continue;
+
+        bool const isLfgGroup = group->isLFGGroup();
+        bool const isBgGroup = group->isBGGroup() || group->isBFGroup();
+        if (!isLfgGroup && !isBgGroup)
+            continue;
+
+        uint32 const groupId = group->GetGUID().GetCounter();
+        if (!processedGroups.insert(groupId).second)
+            continue;
+
+        bool hasRealPlayer = false;
+        std::vector<Player*> botsToRemove;
+
+        for (GroupReference* ref = group->GetFirstMember(); ref != nullptr; ref = ref->next())
+        {
+            Player* member = ref->GetSource();
+            if (!member)
+                continue;
+
+            // Anything managed by RandomPlayerbotMgr is a bot. Any connected
+            // member outside playerBots is a real player and keeps the group alive.
+            if (GetPlayerBot(member->GetGUID().GetCounter()))
+                botsToRemove.push_back(member);
+            else
+            {
+                hasRealPlayer = true;
+                break;
+            }
+        }
+
+        if (hasRealPlayer || botsToRemove.empty())
+            continue;
+
+        ObjectGuid const groupGuid = group->GetGUID();
+
+        LOG_INFO("playerbots",
+                 "Queue autoscale cleanup: queue group {} has no real players; removing {} bots (LFG={}, BG={})",
+                 groupGuid.ToString(), botsToRemove.size(), isLfgGroup, isBgGroup);
+
+        // Do not mutate GroupReference while iterating it. Both the LFG/BG
+        // leave paths and RemoveFromGroup() may change or disband the group.
+        for (Player* member : botsToRemove)
+        {
+            if (!member)
+                continue;
+
+            uint32 const botGuid = member->GetGUID().GetCounter();
+
+            if (isLfgGroup)
+            {
+                lfg::LfgState const state = sLFGMgr->GetState(member->GetGUID());
+                if (state != lfg::LFG_STATE_NONE)
+                    sLFGMgr->LeaveLfg(member->GetGUID());
+
+                sLFGMgr->LeaveAllLfgQueues(member->GetGUID(), true, groupGuid);
+            }
+
+            if (isBgGroup)
+            {
+                if (member->InBattleground())
+                {
+                    // Frees the live battleground slot and removes the player
+                    // from the battleground raid.
+                    member->LeaveBattleground();
+                }
+                else
+                {
+                    // The bot may still only be queued or invited.
+                    for (uint8 slot = 0; slot < PLAYER_MAX_BATTLEGROUND_QUEUES; ++slot)
+                    {
+                        BattlegroundQueueTypeId queueTypeId = member->GetBattlegroundQueueTypeId(slot);
+                        if (queueTypeId == BATTLEGROUND_QUEUE_NONE)
+                            continue;
+
+                        member->RemoveBattlegroundQueueId(queueTypeId);
+                        sBattlegroundMgr->GetBattlegroundQueue(queueTypeId)
+                            .RemovePlayer(member->GetGUID(), true);
+                    }
+                }
+            }
+
+            // If the activity-specific leave path did not already detach the
+            // bot, explicitly remove it from the remaining group.
+            if (member->GetGroup())
+                member->RemoveFromGroup(GROUP_REMOVEMETHOD_LEAVE);
+
+            auto reservationItr = queueBurstBots.find(botGuid);
+            if (reservationItr != queueBurstBots.end())
+            {
+                SetEventValue(botGuid, "add", 0, 0);
+                SetEventValue(botGuid, "randomize", 0, 0);
+                queueBurstBots.erase(reservationItr);
+            }
+        }
+    }
+}
+
+void RandomPlayerbotMgr::BalanceQueueBots()
+{
+    if (queueBurstBots.empty())
+        return;
+
+    // Never trim ordinary population here. Only bots created by queue autoscale
+    // are candidates, and only while total reserved population is over MaxRandomBots.
+    if (currentBots.size() <= sPlayerbotAIConfig.maxRandomBots)
+        return;
+
+    uint32 excess = currentBots.size() - sPlayerbotAIConfig.maxRandomBots;
+    uint32 remaining = std::min<uint32>(excess, sPlayerbotAIConfig.queueAutoScaleLogoutBatch);
+    time_t now = time(nullptr);
+
+    for (auto it = queueBurstBots.begin(); it != queueBurstBots.end() && remaining; )
+    {
+        uint32 guid = it->first;
+        QueueBotReservation const& reservation = it->second;
+        Player* bot = GetPlayerBot(guid);
+
+        if (bot && IsQueueBotBusy(bot))
+        {
+            it->second.lastNeeded = now;
+            ++it;
+            continue;
+        }
+
+        if (now < reservation.lastNeeded + sPlayerbotAIConfig.queueAutoScaleIdleSeconds)
+        {
+            ++it;
+            continue;
+        }
+
+        SetEventValue(guid, "add", 0, 0);
+        SetEventValue(guid, "randomize", 0, 0);
+
+        // Offline reservations can be removed immediately. Online bots are
+        // logged out by ProcessBot() on the next manager pass after add expires.
+        if (!bot)
+            currentBots.erase(guid);
+
+        it = queueBurstBots.erase(it);
+        --remaining;
+    }
 }
 
 void RandomPlayerbotMgr::CheckPlayers()
@@ -2648,6 +3666,47 @@ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
     {
         bot->RemovePlayerFlag(PLAYER_FLAGS_NO_XP_GAIN);
     }
+
+    auto qitr = queueBurstBots.find(bot->GetGUID().GetCounter());
+
+    if (qitr != queueBurstBots.end() && qitr->second.targetLevel &&
+        bot->GetLevel() != qitr->second.targetLevel)
+    {
+        uint8 targetLevel = qitr->second.targetLevel;
+
+        SetValue(bot->GetGUID().GetCounter(), "level", targetLevel);
+
+        PlayerbotFactory levelFactory(bot, targetLevel);
+        levelFactory.Randomize(false);
+
+        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+            ai->Reset();
+    }
+
+    // A LFG burst reservation carries an explicit role. Force the primary
+    // talent tab so LfgJoinAction::GetRoles() and the combat AI agree on the
+    // requested tank/healer/DPS role.
+    if (qitr != queueBurstBots.end() && qitr->second.lfg && qitr->second.role != lfg::PLAYER_ROLE_NONE)
+    {
+        uint8 specTab = GetSpecTabForQueueRole(bot->getClass(), qitr->second.role);
+        if (specTab != 255)
+        {
+            uint32 specNo = sPlayerbotAIConfig.randomClassSpecIndex[bot->getClass()][specTab];
+
+            PlayerbotFactory::InitTalentsBySpecNo(bot, specNo, true);
+
+            PlayerbotFactory factory(bot, bot->GetLevel());
+            factory.InitEquipment(false, true);
+            factory.InitGlyphs(false);
+            bot->SendTalentsInfoData(false);
+
+            if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+                ai->Reset();
+        }
+    }
+
+    if (qitr != queueBurstBots.end() && qitr->second.lfg)
+        QueueBurstBotLfgNow(bot, qitr->second);
 }
 
 void RandomPlayerbotMgr::OnPlayerLogin(Player* player)
@@ -2747,6 +3806,7 @@ void RandomPlayerbotMgr::OnPlayerLoginError(uint32 bot)
 {
     SetEventValue(bot, "add", 0, 0);
     currentBots.erase(bot);
+    queueBurstBots.erase(bot);
 }
 
 Player* RandomPlayerbotMgr::GetRandomPlayer()

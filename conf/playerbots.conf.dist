@@ -752,6 +752,47 @@ AiPlayerbot.PreQuests = 0
 # Default: 1 (enabled)
 AiPlayerbot.RandomBotJoinLfg = 1
 
+# Dynamic queue population
+# Temporarily allows random bots above MaxRandomBots when real-player LFG/BG
+# queues do not have enough compatible bots online. Burst bots are removed
+# again after the activity when total random bots is above MaxRandomBots.
+# Default: 0 (disabled)
+AiPlayerbot.QueueAutoScale = 0
+
+# Enable the dynamic population for dungeon finder and battleground queues.
+AiPlayerbot.QueueAutoScaleLFG = 1
+AiPlayerbot.QueueAutoScaleBG = 1
+
+# LFG/LFR/BG queues. Only bots explicitly reserved by QueueAutoScale are used
+# to fill real-player queue demand.
+#
+# The autoscaler also reserves the whole missing population in one pass
+# (subject to QueueAutoScaleMaxBots) instead of QueueAutoScaleLoginBatch.
+# LFG packet injection is still rate-limited by QueueAutoScaleLFGJoinBatch.
+#
+# Default: 0 (disabled)
+AiPlayerbot.QueueAutoScaleBurstOnly = 0
+
+# Absolute ceiling while queue autoscaling is active.
+# For a completely empty 40v40 battleground, allow at least MaxRandomBots + 80.
+AiPlayerbot.QueueAutoScaleMaxBots = 580
+
+# Queue inspection interval in seconds while autoscaling is active.
+AiPlayerbot.QueueAutoScaleCheckInterval = 5
+
+# 40 lets a raid-40 or one full Alterac team be reserved in a single pass.
+AiPlayerbot.QueueAutoScaleLoginBatch = 40
+AiPlayerbot.QueueAutoScaleLogoutBatch = 10
+
+# Keep a released burst bot online this long so it can be reused by another
+# queue instead of immediately doing logout/login churn.
+AiPlayerbot.QueueAutoScaleIdleSeconds = 60
+
+# Maximum time a reserved burst bot may stay outside the requested queue
+# before the reservation is considered stuck and replaced.
+AiPlayerbot.QueueAutoScalePendingSeconds = 60
+AiPlayerbot.QueueAutoScaleLFGJoinBatch = 8
+
 # Enable/Disable periodic online - offline of randombots to mimic the real-world scenario where not all players are online simultaneously
 # When enabled, randombots are randomly selected to go online or offline periodically from a larger set
 # Default: 0 (disabled, the set of online bots remains fixed)
