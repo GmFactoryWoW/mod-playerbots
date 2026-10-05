@@ -1451,10 +1451,15 @@ void RandomPlayerbotMgr::CancelQueueBurst(bool cancelLfg, bool cancelBg)
 
         SetEventValue(guid, "add", 0, 0);
         SetEventValue(guid, "randomize", 0, 0);
+
+        bool const restoreLfgLocks = reservation.lfg && bot;
         if (!bot)
             currentBots.erase(guid);
 
         it = queueBurstBots.erase(it);
+
+        if (restoreLfgLocks)
+            sLFGMgr->InitializeLockedDungeons(bot, bot->GetGroup());
     }
 }
 
@@ -1858,10 +1863,15 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
             SetEventValue(guid, "add", 0, 0);
             SetEventValue(guid, "randomize", 0, 0);
 
+            bool const restoreLfgLocks = reservation.lfg && pendingBot;
             if (!pendingBot)
                 currentBots.erase(guid);
 
             itr = queueBurstBots.erase(itr);
+
+            if (restoreLfgLocks)
+                sLFGMgr->InitializeLockedDungeons(pendingBot, pendingBot->GetGroup());
+
             continue;
         }
 
@@ -2069,6 +2079,11 @@ bool RandomPlayerbotMgr::QueueBurstBotLfgNow(Player* bot, QueueBotReservation& r
     uint32 roleMask = reservation.role;
     std::string const gearScore = std::to_string(ai->GetEquipGearScore(bot));
 
+    // Rebuild the cached LFG lock map immediately before joining. The
+    // PlayerbotsGlobalScript hook removes only quest/item/achievement locks
+    // while this character has an active burst-LFG reservation.
+    sLFGMgr->InitializeLockedDungeons(bot, bot->GetGroup());
+
     if (sPlayerbotAIConfig.queueAutoScaleBurstOnly)
     {
         reservation.joinRequestedAt = now;
@@ -2254,9 +2269,14 @@ void RandomPlayerbotMgr::CleanupOrphanedQueueGroups()
             auto reservationItr = queueBurstBots.find(botGuid);
             if (reservationItr != queueBurstBots.end())
             {
+                bool const restoreLfgLocks = reservationItr->second.lfg;
+
                 SetEventValue(botGuid, "add", 0, 0);
                 SetEventValue(botGuid, "randomize", 0, 0);
                 queueBurstBots.erase(reservationItr);
+
+                if (restoreLfgLocks)
+                    sLFGMgr->InitializeLockedDungeons(member, member->GetGroup());
             }
         }
     }
@@ -2298,12 +2318,18 @@ void RandomPlayerbotMgr::BalanceQueueBots()
         SetEventValue(guid, "add", 0, 0);
         SetEventValue(guid, "randomize", 0, 0);
 
+        bool const restoreLfgLocks = reservation.lfg && bot;
+
         // Offline reservations can be removed immediately. Online bots are
         // logged out by ProcessBot() on the next manager pass after add expires.
         if (!bot)
             currentBots.erase(guid);
 
         it = queueBurstBots.erase(it);
+
+        if (restoreLfgLocks)
+            sLFGMgr->InitializeLockedDungeons(bot, bot->GetGroup());
+
         --remaining;
     }
 }

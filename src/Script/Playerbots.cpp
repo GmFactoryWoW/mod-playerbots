@@ -18,6 +18,7 @@
 #include "AllMapScript.h"
 #include "GlobalScript.h"
 #include "GuildTaskMgr.h"
+#include "LFG.h"
 #include "PlayerScript.h"
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotCommandScript.h"
@@ -476,8 +477,24 @@ class PlayerbotsGlobalScript : public GlobalScript
 {
 public:
     PlayerbotsGlobalScript() : GlobalScript("PlayerbotsGlobalScript", {
-        GLOBALHOOK_CAN_CREATE_LFG_PROPOSAL
+        GLOBALHOOK_CAN_CREATE_LFG_PROPOSAL,
+        GLOBALHOOK_ON_INITIALIZE_LOCKED_DUNGEONS
     }) {}
+
+    void OnInitializeLockedDungeons(Player* player, uint8& /*level*/, uint32& lockData,
+                                    lfg::LFGDungeonData const* /*dungeon*/) override
+    {
+        if (!player || !sRandomPlayerbotMgr.IsQueueBurstBot(player, true, false))
+            return;
+
+        // Burst-LFG bots must ignore attunement requirements only. Keep all
+        // other AzerothCore LFG restrictions (level, expansion, gear, raid
+        // lock, season, etc.) untouched.
+        if (lockData == lfg::LFG_LOCKSTATUS_QUEST_NOT_COMPLETED ||
+            lockData == lfg::LFG_LOCKSTATUS_MISSING_ITEM ||
+            lockData == lfg::LFG_LOCKSTATUS_MISSING_ACHIEVEMENT)
+            lockData = 0;
+    }
 
     // Never form a dungeon group made only of bots
     bool CanCreateLfgProposal(lfg::Lfg5Guids const& guids) override
