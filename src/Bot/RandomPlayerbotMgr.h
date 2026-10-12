@@ -202,9 +202,9 @@ protected:
 private:
     RandomPlayerbotMgr() : PlayerbotHolder()
     {
-        this->playersLevel = sPlayerbotAIConfig.randombotStartingLevel;
+        this->playersLevel = sPlayerbotAIConfig.RandomBotStartingLevel;
 
-        if (sPlayerbotAIConfig.enabled || sPlayerbotAIConfig.randomBotAutologin)
+        if (sPlayerbotAIConfig.Enabled || sPlayerbotAIConfig.RandomBotAutologin)
         {
             PlayerbotCommandServer::instance().Start();
         }
@@ -278,6 +278,7 @@ private:
     // std::map<uint32, std::vector<WorldLocation>> rpgLocsCache;
     std::map<uint32, std::map<uint32, std::vector<WorldLocation>>> rpgLocsCacheLevel;
     std::map<TeamId, std::map<BattlegroundTypeId, std::vector<uint32>>> BattleMastersCache;
+    std::unordered_map<uint32, ObjectGuid::LowType> BattleMasterSpawnIds;
     std::unordered_map<uint32, BotEventCache> eventCache;
     std::unordered_set<uint32> currentBots;
     std::unordered_map<uint32, QueueBotReservation> queueBurstBots;

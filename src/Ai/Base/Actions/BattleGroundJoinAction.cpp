@@ -317,7 +317,7 @@ bool BGJoinAction::isUseful()
         return false;
 
     // do not try if BG bots disabled
-    if (!sPlayerbotAIConfig.randomBotJoinBG && !burstBot)
+    if (!sPlayerbotAIConfig.RandomBotJoinBG && !burstBot)
         return false;
 
     // can't queue while in BG/Arena
