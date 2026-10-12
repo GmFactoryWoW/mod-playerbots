@@ -392,7 +392,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
             sRandomPlayerbotMgr.CheckPlayers();
     }
 
-    if (sPlayerbotAIConfig.randomBotJoinBG /* && !players.empty()*/ ||
+    if (sPlayerbotAIConfig.RandomBotJoinBG /* && !players.empty()*/ ||
         (sPlayerbotAIConfig.queueAutoScale && sPlayerbotAIConfig.queueAutoScaleBg))
     {
         uint32 interval = sPlayerbotAIConfig.queueAutoScale && sPlayerbotAIConfig.queueAutoScaleBg
@@ -402,7 +402,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
             sRandomPlayerbotMgr.CheckBgQueue();
     }
 
-    if (sPlayerbotAIConfig.randomBotJoinLfg /* && !players.empty()*/ ||
+    if (sPlayerbotAIConfig.RandomBotJoinBG /* && !players.empty()*/ ||
         (sPlayerbotAIConfig.queueAutoScale && sPlayerbotAIConfig.queueAutoScaleLfg))
     {
         uint32 interval = sPlayerbotAIConfig.queueAutoScale && sPlayerbotAIConfig.queueAutoScaleLfg
@@ -2316,10 +2316,10 @@ void RandomPlayerbotMgr::BalanceQueueBots()
 
     // Never trim ordinary population here. Only bots created by queue autoscale
     // are candidates, and only while total reserved population is over MaxRandomBots.
-    if (currentBots.size() <= sPlayerbotAIConfig.maxRandomBots)
+    if (currentBots.size() <= sPlayerbotAIConfig.MaxRandomBots)
         return;
 
-    uint32 excess = currentBots.size() - sPlayerbotAIConfig.maxRandomBots;
+    uint32 excess = currentBots.size() - sPlayerbotAIConfig.MaxRandomBots;
     uint32 remaining = std::min<uint32>(excess, sPlayerbotAIConfig.queueAutoScaleLogoutBatch);
     time_t now = time(nullptr);
 

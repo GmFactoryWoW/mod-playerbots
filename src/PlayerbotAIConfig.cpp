@@ -276,8 +276,8 @@ bool PlayerbotAIConfig::Initialize()
     queueAutoScaleBg = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScaleBG", true);
     queueAutoScaleBurstOnly = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScaleBurstOnly", false);
     queueAutoScaleMaxBots = sConfigMgr->GetOption<uint32>(
-        "AiPlayerbot.QueueAutoScaleMaxBots", std::max<uint32>(maxRandomBots, maxRandomBots + 80));
-    queueAutoScaleMaxBots = std::max<uint32>(queueAutoScaleMaxBots, maxRandomBots);
+        "AiPlayerbot.QueueAutoScaleMaxBots", std::max<uint32>(MaxRandomBots, MaxRandomBots + 80));
+    queueAutoScaleMaxBots = std::max<uint32>(queueAutoScaleMaxBots, MaxRandomBots);
     queueAutoScaleCheckInterval =
         std::max<uint32>(1, sConfigMgr->GetOption<uint32>("AiPlayerbot.QueueAutoScaleCheckInterval", 5));
     queueAutoScaleLoginBatch =
