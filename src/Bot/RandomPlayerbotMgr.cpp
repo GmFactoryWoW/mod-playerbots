@@ -434,7 +434,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     uint32 updateBots = sPlayerbotAIConfig.RandomBotsPerInterval * onlineBotFocus / 100;
     uint32 maxNewBots =
         onlineBotCount < effectiveAllowedBotCount &&
-                (sPlayerbotAIConfig.disabledWithoutRealPlayer == false ||
+                (sPlayerbotAIConfig.DisabledWithoutRealPlayer == false ||
                  (realPlayerIsLogged && DelayLoginBotsTimer != 0 && time(nullptr) >= DelayLoginBotsTimer))
             ? effectiveAllowedBotCount - onlineBotCount
             : 0;
@@ -1748,8 +1748,8 @@ void RandomPlayerbotMgr::CheckLfgQueue()
             uint32 needTank = td.targetTanks > td.tanks ? td.targetTanks - td.tanks : 0;
             uint32 needHeal = td.targetHeals > td.heals ? td.targetHeals - td.heals : 0;
             uint32 needDps = td.targetDps > td.dps ? td.targetDps - td.dps : 0;
-            uint8 minLevel = td.minLevel ? td.minLevel : sPlayerbotAIConfig.randomBotMinLevel;
-            uint8 maxLevel = td.maxLevel ? td.maxLevel : sPlayerbotAIConfig.randomBotMaxLevel;
+            uint8 minLevel = td.minLevel ? td.minLevel : sPlayerbotAIConfig.RandomBotMinLevel;
+            uint8 maxLevel = td.maxLevel ? td.maxLevel : sPlayerbotAIConfig.RandomBotMaxLevel;
 
             if (needTank && remaining)
             {
@@ -1913,8 +1913,8 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
 
     if (!forLfg)
     {
-        minLevel = std::max<uint8>(minLevel, sPlayerbotAIConfig.randomBotMinLevel);
-        maxLevel = std::min<uint8>(maxLevel, sPlayerbotAIConfig.randomBotMaxLevel);
+        minLevel = std::max<uint8>(minLevel, sPlayerbotAIConfig.RandomBotMinLevel);
+        maxLevel = std::min<uint8>(maxLevel, sPlayerbotAIConfig.RandomBotMaxLevel);
         if (minLevel > maxLevel)
             std::swap(minLevel, maxLevel);
     }
@@ -1938,7 +1938,7 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
     std::vector<uint32> accountsToScan = rndBotTypeAccounts;
     if (forBg || forLfg)
     {
-        for (uint32 accountId : sPlayerbotAIConfig.randomBotAccounts)
+        for (uint32 accountId : sPlayerbotAIConfig.RandomBotAccounts)
         {
             if (std::find(accountsToScan.begin(), accountsToScan.end(), accountId) == accountsToScan.end())
                 accountsToScan.push_back(accountId);
@@ -1962,7 +1962,7 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
                 continue;
             if (GetEventValue(c.guid, "add"))
                 continue;
-            if (sPlayerbotAIConfig.disableDeathKnightLogin && c.cls == CLASS_DEATH_KNIGHT)
+            if (sPlayerbotAIConfig.DisableDeathKnightLogin && c.cls == CLASS_DEATH_KNIGHT)
                 continue;
             if (!allowAnyFaction && (team == TEAM_ALLIANCE) != IsAlliance(c.race))
                 continue;
@@ -2010,10 +2010,10 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
         if (added >= wanted)
             break;
 
-        SetEventValue(c.guid, "add", 1, sPlayerbotAIConfig.permanentlyInWorldTime);
+        SetEventValue(c.guid, "add", 1, sPlayerbotAIConfig.PermanentlyInWorldTime);
         SetEventValue(c.guid, "logout", 0, 0);
         // Keep the selected role/spec stable for the lifetime of the burst bot.
-        SetEventValue(c.guid, "randomize", 1, sPlayerbotAIConfig.permanentlyInWorldTime);
+        SetEventValue(c.guid, "randomize", 1, sPlayerbotAIConfig.PermanentlyInWorldTime);
         currentBots.insert(c.guid);
 
         QueueBotReservation reservation;
@@ -3748,7 +3748,7 @@ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
         uint8 specTab = GetSpecTabForQueueRole(bot->getClass(), qitr->second.role);
         if (specTab != 255)
         {
-            uint32 specNo = sPlayerbotAIConfig.randomClassSpecIndex[bot->getClass()][specTab];
+            uint32 specNo = sPlayerbotAIConfig.RandomClassSpecIndex[bot->getClass()][specTab];
 
             PlayerbotFactory::InitTalentsBySpecNo(bot, specNo, true);
 
