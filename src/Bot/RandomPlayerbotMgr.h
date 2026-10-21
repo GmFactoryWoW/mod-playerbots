@@ -101,13 +101,18 @@ public:
         uint8 maxLevel = 80;
         uint8 targetLevel = 1;
         uint32 lfgDungeonId = 0;
+        BattlegroundQueueTypeId bgQueueType = BATTLEGROUND_QUEUE_NONE;
+        BattlegroundBracketId bgBracket = BG_BRACKET_ID_FIRST;
         time_t lastNeeded = 0;
         time_t reservedAt = 0;
+        time_t readyAt = 0;
         time_t joinRequestedAt = 0;
         bool lfg = false;
         bool bg = false;
     };
 
+    bool GetQueueBurstBg(Player const* bot, BattlegroundQueueTypeId& queueType,
+                         BattlegroundBracketId& bracket) const;
     static RandomPlayerbotMgr& instance()
     {
         static RandomPlayerbotMgr instance;
@@ -251,7 +256,9 @@ private:
     void GetBots();
     std::vector<uint32> GetBgBots(uint32 bracket);
     uint32 EnsureQueueBots(TeamId team, uint8 minLevel, uint8 maxLevel, uint8 role, uint32 count,
-                           bool forLfg, bool forBg, uint32 lfgDungeonId = 0);
+                           bool forLfg, bool forBg, uint32 lfgDungeonId = 0,
+                           BattlegroundQueueTypeId bgQueueType = BATTLEGROUND_QUEUE_NONE,
+                           BattlegroundBracketId bgBracket = BG_BRACKET_ID_FIRST);
     bool CanClassFillQueueRole(uint8 cls, uint8 role) const;
     uint8 GetSpecTabForQueueRole(uint8 cls, uint8 role) const;
     bool IsQueueBotBusy(Player* bot) const;

@@ -178,6 +178,7 @@ public:
     bool RandomBotJoinLfg;
     bool RandomBotJoinLfgOutleveledExpansion;
     bool queueAutoScale;
+    bool queueAutoScaleDebug;
     bool queueAutoScaleLfg;
     bool queueAutoScaleBg;
     bool queueAutoScaleBurstOnly;

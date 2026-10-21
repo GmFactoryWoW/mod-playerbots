@@ -273,7 +273,8 @@ bool PlayerbotAIConfig::Initialize()
     RandomBotJoinLfg = sConfigMgr->GetOption<bool>("Playerbots.RandomBotJoinLfg", true);
     RandomBotJoinLfgOutleveledExpansion =
         sConfigMgr->GetOption<bool>("Playerbots.RandomBotJoinLfgOutleveledExpansion", true);
-        queueAutoScale = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScale", false);
+    queueAutoScale = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScale", false);
+    queueAutoScaleDebug = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScaleDebug", false) && queueAutoScale;
     queueAutoScaleLfg = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScaleLFG", true);
     queueAutoScaleBg = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScaleBG", true);
     queueAutoScaleBurstOnly = sConfigMgr->GetOption<bool>("AiPlayerbot.QueueAutoScaleBurstOnly", false);
@@ -292,6 +293,13 @@ bool PlayerbotAIConfig::Initialize()
         std::max<uint32>(10, sConfigMgr->GetOption<uint32>("AiPlayerbot.QueueAutoScalePendingSeconds", 60));
     queueAutoScaleLfgJoinBatch =
         std::max<uint32>(1, sConfigMgr->GetOption<uint32>("AiPlayerbot.QueueAutoScaleLFGJoinBatch", 8));
+
+    if (queueAutoScaleDebug)
+        LOG_INFO("playerbots", "[QueueAutoScale] Debug enabled: burstOnly={}, LFG={}, BG={}, maxBots={}, "
+                 "checkInterval={}s, managerInterval={}s, pendingTimeout={}s, loginBatch={}, LFGJoinBatch={}",
+                 queueAutoScaleBurstOnly, queueAutoScaleLfg, queueAutoScaleBg, queueAutoScaleMaxBots,
+                 queueAutoScaleCheckInterval, RandomBotUpdateInterval, queueAutoScalePendingSeconds,
+                 queueAutoScaleLoginBatch, queueAutoScaleLfgJoinBatch);
 
     RestrictHealerDPS = sConfigMgr->GetOption<bool>("Playerbots.HealerDPSMapRestriction", false);
     LoadList<std::vector<uint32>>(

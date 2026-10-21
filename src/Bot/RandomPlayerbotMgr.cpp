@@ -416,6 +416,13 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     {
         CleanupOrphanedQueueGroups();
         BalanceQueueBots();
+
+        // Queue checks may have reserved or released bots during this pass.
+        availableBots = currentBots;
+        effectiveAllowedBotCount = maxAllowedBotCount;
+        if (!queueBurstBots.empty())
+            effectiveAllowedBotCount = std::max<uint32>(effectiveAllowedBotCount,
+                std::min<uint32>(sPlayerbotAIConfig.queueAutoScaleMaxBots, currentBots.size()));
     }
 
     if (sPlayerbotAIConfig.RandomBotAutologin && sPlayerbotAIConfig.RandomBotPrintStatsInterval &&
@@ -439,6 +446,12 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
             ? effectiveAllowedBotCount - onlineBotCount
             : 0;
     uint32 loginBots = std::min(sPlayerbotAIConfig.RandomBotsPerInterval - updateBots, maxNewBots);
+
+    if (sPlayerbotAIConfig.queueAutoScaleDebug && !queueBurstBots.empty())
+        LOG_INFO("playerbots", "[QueueAutoScale] Manager: reserved={}, population={}, online={}, loading={}, "
+                 "effectiveLimit={}, loginBudget={}, updateBudget={}, loginBlockedByLoading={}",
+                 queueBurstBots.size(), currentBots.size(), onlineBotCount, botLoading.size(),
+                 effectiveAllowedBotCount, loginBots, updateBots, !botLoading.empty());
 
     if (!availableBots.empty())
     {
@@ -479,7 +492,9 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
                     break;
             }
 
-            DelayLoginBotsTimer = 0;
+            // Keep the initial real-player login delay satisfied while filling queues.
+            if (!sPlayerbotAIConfig.queueAutoScale || queueBurstBots.empty())
+                DelayLoginBotsTimer = 0;
         }
     }
 
@@ -1363,8 +1378,56 @@ void RandomPlayerbotMgr::LogBattlegroundInfo()
             uint32 alliance = info.bgAlliancePlayerCount + info.bgAllianceBotCount;
             uint32 horde = info.bgHordePlayerCount + info.bgHordeBotCount;
 
+            uint32 invitedAlliance = 0;
+            uint32 invitedHorde = 0;
+            bool hasJoinableInstance = false;
+            for (uint32 instanceId : info.bgInstances)
+            {
+                Battleground* bg = sBattlegroundMgr->GetBattleground(instanceId, bgTypeId);
+                if (!bg || bg->GetStatus() == STATUS_WAIT_LEAVE)
+                    continue;
+
+                // Invited counts include players already inside the battleground.
+                invitedAlliance += bg->GetInvitedCount(TEAM_ALLIANCE);
+                invitedHorde += bg->GetInvitedCount(TEAM_HORDE);
+                if (sPlayerbotAIConfig.queueAutoScaleDebug)
+                    LOG_INFO("playerbots", "[QueueAutoScale] BG instance={}: inside=A:{}/H:{}, "
+                             "insideAndInvited=A:{}/H:{}, joinableSlots=A:{}/H:{}",
+                             instanceId, bg->GetPlayersCountByTeam(TEAM_ALLIANCE),
+                             bg->GetPlayersCountByTeam(TEAM_HORDE), bg->GetInvitedCount(TEAM_ALLIANCE),
+                             bg->GetInvitedCount(TEAM_HORDE), bg->GetFreeSlotsForTeam(TEAM_ALLIANCE),
+                             bg->GetFreeSlotsForTeam(TEAM_HORDE));
+
+                if (bg->HasFreeSlots())
+                {
+                    bg->AddToBGFreeSlotQueue();
+                    hasJoinableInstance = true;
+                }
+            }
+
+            // Balanced invitations can admit only one bot per team per update.
+            // Queued bots satisfy population demand but still need matchmaking updates.
+            if (hasJoinableInstance && (info.bgAlliancePlayerCount || info.bgHordePlayerCount) &&
+                (alliance > invitedAlliance || horde > invitedHorde))
+            {
+                sBattlegroundMgr->ScheduleQueueUpdate(0, ARENA_TYPE_NONE, queueTypeId, bgTypeId,
+                                                      BattlegroundBracketId(bracketRaw));
+                if (sPlayerbotAIConfig.queueAutoScaleDebug)
+                    LOG_INFO("playerbots", "[QueueAutoScale] BG refill scheduled: queue={}, bracket={}",
+                             uint32(queueTypeId), uint32(bracketRaw));
+            }
+
             uint32 needAlliance = alliance < targetPerTeam ? targetPerTeam - alliance : 0;
             uint32 needHorde = horde < targetPerTeam ? targetPerTeam - horde : 0;
+
+            if (sPlayerbotAIConfig.queueAutoScaleDebug)
+                LOG_INFO("playerbots", "[QueueAutoScale] BG demand: queue={}, bracket={}, levels={}-{}, "
+                         "targetPerTeam={}, players=A:{}/H:{}, bots=A:{}/H:{}, missing=A:{}/H:{}, "
+                         "instances={}, activeQueue={}, population={}/{}",
+                         uint32(queueTypeId), uint32(bracketRaw), info.minLevel, info.maxLevel, targetPerTeam,
+                         info.bgAlliancePlayerCount, info.bgHordePlayerCount, info.bgAllianceBotCount,
+                         info.bgHordeBotCount, needAlliance, needHorde, info.bgInstanceCount, info.activeBgQueue,
+                         currentBots.size(), sPlayerbotAIConfig.queueAutoScaleMaxBots);
 
             if (!needAlliance && !needHorde)
                 continue;
@@ -1374,37 +1437,40 @@ void RandomPlayerbotMgr::LogBattlegroundInfo()
                 room = sPlayerbotAIConfig.queueAutoScaleMaxBots - currentBots.size();
 
             uint32 totalMissing = needAlliance + needHorde;
-            uint32 remaining = sPlayerbotAIConfig.queueAutoScaleBurstOnly
+            uint32 remaining = (sPlayerbotAIConfig.queueAutoScale && sPlayerbotAIConfig.queueAutoScaleBurstOnly)
                                    ? std::min<uint32>(totalMissing, room)
                                    : std::min<uint32>(sPlayerbotAIConfig.queueAutoScaleLoginBatch, room);
 
             if (!remaining)
                 continue;
 
-            // Fair first-pass split. Previously Alliance was always processed
-            // first and could consume the entire batch every cycle.
+            // Reserve the scarce faction first, then use all remaining capacity.
             uint32 budgetAlliance = 0;
             uint32 budgetHorde = 0;
 
-            if (needAlliance && needHorde)
+            if (needHorde >= needAlliance)
             {
-                budgetAlliance = std::min<uint32>(needAlliance, (remaining + 1) / 2);
-                budgetHorde = std::min<uint32>(needHorde, remaining / 2);
+                budgetHorde = std::min(needHorde, remaining);
+                budgetAlliance = std::min(needAlliance, remaining - budgetHorde);
             }
-            else if (needAlliance)
-                budgetAlliance = std::min<uint32>(needAlliance, remaining);
             else
-                budgetHorde = std::min<uint32>(needHorde, remaining);
+            {
+                budgetAlliance = std::min(needAlliance, remaining);
+                budgetHorde = std::min(needHorde, remaining - budgetAlliance);
+            }
 
             if (budgetAlliance)
-                EnsureQueueBots(
+            {
+                uint32 added = EnsureQueueBots(
                     TEAM_ALLIANCE, info.minLevel, info.maxLevel, lfg::PLAYER_ROLE_NONE,
-                    budgetAlliance, false, true);
++                    budgetAlliance, false, true, 0, queueTypeId, BattlegroundBracketId(bracketRaw));
+                budgetHorde = std::min(needHorde, budgetHorde + budgetAlliance - added);
+            }
 
             if (budgetHorde)
                 EnsureQueueBots(
                     TEAM_HORDE, info.minLevel, info.maxLevel, lfg::PLAYER_ROLE_NONE,
-                    budgetHorde, false, true);
+                    budgetHorde, false, true, 0, queueTypeId, BattlegroundBracketId(bracketRaw));
         }
     }
 }
@@ -1478,6 +1544,11 @@ void RandomPlayerbotMgr::CancelQueueBurst(bool cancelLfg, bool cancelBg)
 
         SetEventValue(guid, "add", 0, 0);
         SetEventValue(guid, "randomize", 0, 0);
+
+        if (sPlayerbotAIConfig.queueAutoScaleDebug)
+            LOG_INFO("playerbots", "[QueueAutoScale] Cancelled reservation: bot={}, LFG={}, BG={}, "
+                     "no real-player activity remaining", ObjectGuid::Create<HighGuid::Player>(guid).ToString(),
+                     reservation.lfg, reservation.bg);
 
         bool const restoreLfgLocks = reservation.lfg && bot;
         if (!bot)
@@ -1737,6 +1808,10 @@ void RandomPlayerbotMgr::CheckLfgQueue()
         uint32 remaining = sPlayerbotAIConfig.queueAutoScaleBurstOnly
                                ? room
                                : std::min<uint32>(sPlayerbotAIConfig.queueAutoScaleLoginBatch, room);
+        if (sPlayerbotAIConfig.queueAutoScaleDebug && !demand.empty())
+            LOG_INFO("playerbots", "[QueueAutoScale] LFG demand: activities={}, population={}/{}, "
+                     "reservationBudget={}", demand.size(), currentBots.size(),
+                     sPlayerbotAIConfig.queueAutoScaleMaxBots, remaining);
         for (auto& [key, td] : demand)
         {
             if (!remaining || !td.total || !td.targetPlayers)
@@ -1748,6 +1823,10 @@ void RandomPlayerbotMgr::CheckLfgQueue()
             uint32 needTank = td.targetTanks > td.tanks ? td.targetTanks - td.tanks : 0;
             uint32 needHeal = td.targetHeals > td.heals ? td.targetHeals - td.heals : 0;
             uint32 needDps = td.targetDps > td.dps ? td.targetDps - td.dps : 0;
+            if (sPlayerbotAIConfig.queueAutoScaleDebug)
+                LOG_INFO("playerbots", "[QueueAutoScale] LFG roles: dungeon={}, team={}, target={}, "
+                         "missingTank={}, missingHealer={}, missingDps={}", dungeonId, uint32(team),
+                         td.targetPlayers, needTank, needHeal, needDps);
             uint8 minLevel = td.minLevel ? td.minLevel : sPlayerbotAIConfig.RandomBotMinLevel;
             uint8 maxLevel = td.maxLevel ? td.maxLevel : sPlayerbotAIConfig.RandomBotMaxLevel;
 
@@ -1835,7 +1914,8 @@ uint8 RandomPlayerbotMgr::GetSpecTabForQueueRole(uint8 cls, uint8 role) const
 }
 
 uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 maxLevel, uint8 role, uint32 count,
-                                           bool forLfg, bool forBg, uint32 lfgDungeonId)
+                                           bool forLfg, bool forBg, uint32 lfgDungeonId,
+                                           BattlegroundQueueTypeId bgQueueType, BattlegroundBracketId bgBracket)
 {
     if (!count || currentBots.size() >= sPlayerbotAIConfig.queueAutoScaleMaxBots)
         return 0;
@@ -1856,7 +1936,8 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
 
         if (reservation.team != team || reservation.role != role || reservation.lfg != forLfg ||
             reservation.bg != forBg ||
-            (forLfg && reservation.lfgDungeonId != lfgDungeonId))
+            (forLfg && reservation.lfgDungeonId != lfgDungeonId) ||
+            (forBg && (reservation.bgQueueType != bgQueueType || reservation.bgBracket != bgBracket)))
         {
             ++itr;
             continue;
@@ -1867,7 +1948,20 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
         if (pendingBot)
         {
             if (forBg)
-                enteredQueue = pendingBot->InBattlegroundQueue() || pendingBot->InBattleground();
+            {
+                if (pendingBot->InBattleground() && pendingBot->GetBattleground())
+                    enteredQueue = pendingBot->GetBattleground()->GetBracketId() == bgBracket &&
+                        sBattlegroundMgr->BGQueueTypeId(pendingBot->GetBattleground()->GetBgTypeID(), ARENA_TYPE_NONE) == bgQueueType;
+                if (!enteredQueue)
+                {
+                    for (uint8 slot = 0; slot < PLAYER_MAX_BATTLEGROUND_QUEUES; ++slot)
+                        if (pendingBot->GetBattlegroundQueueTypeId(slot) == bgQueueType)
+                        {
+                            enteredQueue = true;
+                            break;
+                        }
+                }
+            }
             else if (forLfg)
             {
                 lfg::LfgState state = sLFGMgr->GetState(pendingBot->GetGUID());
@@ -1884,9 +1978,21 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
         // A reservation that never reaches the queue must not block this role
         // forever. This can happen after a failed login, failed LFG join,
         // role mismatch or AI action that never fires.
-        if (reservation.reservedAt &&
-            now >= reservation.reservedAt + sPlayerbotAIConfig.queueAutoScalePendingSeconds)
+        time_t const pendingSince = reservation.readyAt ? reservation.readyAt : reservation.reservedAt;
+        bool const loading = botLoading.contains(ObjectGuid::Create<HighGuid::Player>(guid));
+        if (!loading && pendingSince &&
+            now >= pendingSince + sPlayerbotAIConfig.queueAutoScalePendingSeconds)
         {
+            if (sPlayerbotAIConfig.queueAutoScaleDebug)
+                LOG_INFO("playerbots", "[QueueAutoScale] Reservation expired: bot={}, age={}s, online={}, "
+                         "LFG={}, BG={}, dungeon={}, queue={}, bracket={}, inWorld={}, combat={}, "
+                         "dead={}, deserter={}, grouped={}, level={}",
+                         ObjectGuid::Create<HighGuid::Player>(guid).ToString(), now - reservation.reservedAt,
+                         pendingBot != nullptr, forLfg, forBg, lfgDungeonId, uint32(bgQueueType), uint32(bgBracket),
+                         pendingBot && pendingBot->IsInWorld(), pendingBot && pendingBot->IsInCombat(),
+                         pendingBot && pendingBot->isDead(), pendingBot && pendingBot->IsDeserter(),
+                         pendingBot && pendingBot->GetGroup(), pendingBot ? pendingBot->GetLevel() : 0);
+
             SetEventValue(guid, "add", 0, 0);
             SetEventValue(guid, "randomize", 0, 0);
 
@@ -1907,7 +2013,14 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
     }
 
     if (pending >= count)
+    {
+        if (sPlayerbotAIConfig.queueAutoScaleDebug)
+            LOG_INFO("playerbots", "[QueueAutoScale] Demand covered by pending reservations: team={}, "
+                     "LFG={}, BG={}, dungeon={}, queue={}, bracket={}, role={}, requested={}, pending={}",
+                     uint32(team), forLfg, forBg, lfgDungeonId, uint32(bgQueueType), uint32(bgBracket),
+                     uint32(role), count, pending);
         return 0;
+    }
 
     count -= pending;
 
@@ -1918,6 +2031,10 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
         if (minLevel > maxLevel)
             std::swap(minLevel, maxLevel);
     }
+
+    uint8 const targetLevel = static_cast<uint8>((static_cast<uint32>(minLevel) + maxLevel) / 2);
+    bool const excludeDeathKnights = sPlayerbotAIConfig.DisableDeathKnightLogin ||
+        targetLevel < sWorld->getIntConfig(CONFIG_START_HEROIC_PLAYER_LEVEL);
 
     struct Candidate
     {
@@ -1962,7 +2079,7 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
                 continue;
             if (GetEventValue(c.guid, "add"))
                 continue;
-            if (sPlayerbotAIConfig.DisableDeathKnightLogin && c.cls == CLASS_DEATH_KNIGHT)
+            if (excludeDeathKnights && c.cls == CLASS_DEATH_KNIGHT)
                 continue;
             if (!allowAnyFaction && (team == TEAM_ALLIANCE) != IsAlliance(c.race))
                 continue;
@@ -1985,6 +2102,14 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
         } while (result->NextRow());
     }
 
+    if (sPlayerbotAIConfig.queueAutoScaleDebug)
+        LOG_INFO("playerbots", "[QueueAutoScale] Candidates: team={}, LFG={}, BG={}, dungeon={}, queue={}, "
+                 "bracket={}, role={}, levels={}-{}, missingAfterPending={}, pending={}, exact={}, "
+                 "requireLevelChange={}, accounts={}",
+                 uint32(team), forLfg, forBg, lfgDungeonId, uint32(bgQueueType), uint32(bgBracket), uint32(role),
+                 minLevel, maxLevel, count, pending, exactCandidates.size(), fallbackCandidates.size(),
+                 accountsToScan.size());
+
     if (exactCandidates.empty() && fallbackCandidates.empty())
         return 0;
 
@@ -2000,11 +2125,6 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
     uint32 room = sPlayerbotAIConfig.queueAutoScaleMaxBots - currentBots.size();
     uint32 wanted = std::min<uint32>(count, room);
     uint32 added = 0;
-    uint8 targetLevel = static_cast<uint8>((static_cast<uint32>(minLevel) + maxLevel) / 2);
-
-    if (forLfg && minLevel == maxLevel)
-        targetLevel = minLevel;
-
     for (Candidate const& c : candidates)
     {
         if (added >= wanted)
@@ -2023,11 +2143,18 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
         reservation.maxLevel = maxLevel;
         reservation.targetLevel = targetLevel;
         reservation.lfgDungeonId = forLfg ? lfgDungeonId : 0;
+        reservation.bgQueueType = forBg ? bgQueueType : BATTLEGROUND_QUEUE_NONE;
+        reservation.bgBracket = bgBracket;
         reservation.lastNeeded = time(nullptr);
         reservation.reservedAt = reservation.lastNeeded;
         reservation.lfg = forLfg;
         reservation.bg = forBg;
         queueBurstBots[c.guid] = reservation;
+        if (sPlayerbotAIConfig.queueAutoScaleDebug)
+            LOG_INFO("playerbots", "[QueueAutoScale] Reserved bot={}: team={}, class={}, level={}->{}, "
+                     "LFG={}, BG={}, dungeon={}, queue={}, bracket={}, role={}",
+                     ObjectGuid::Create<HighGuid::Player>(c.guid).ToString(), uint32(team), c.cls, c.level,
+                     targetLevel, forLfg, forBg, lfgDungeonId, uint32(bgQueueType), uint32(bgBracket), uint32(role));
         ++added;
     }
 
@@ -2097,7 +2224,12 @@ bool RandomPlayerbotMgr::QueueBurstBotLfgNow(Player* bot, QueueBotReservation& r
     }
 
     if (list.empty())
+    {
+        if (sPlayerbotAIConfig.queueAutoScaleDebug)
+            LOG_INFO("playerbots", "[QueueAutoScale] LFG join blocked: bot={}, dungeon={}, level={}, "
+                     "no eligible dungeon", bot->GetGUID().ToString(), reservation.lfgDungeonId, bot->GetLevel());
         return false;
+    }
 
     PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
     if (!ai)
@@ -2120,6 +2252,10 @@ bool RandomPlayerbotMgr::QueueBurstBotLfgNow(Player* bot, QueueBotReservation& r
         bot->UpdateLFGChannel();
 
         lfg::LfgState state = sLFGMgr->GetState(bot->GetGUID());
+        if (sPlayerbotAIConfig.queueAutoScaleDebug)
+            LOG_INFO("playerbots", "[QueueAutoScale] LFG direct join: bot={}, dungeon={}, role={}, state={}, "
+                     "accepted={}", bot->GetGUID().ToString(), reservation.lfgDungeonId, roleMask,
+                     uint32(state), state != lfg::LFG_STATE_NONE);
         if (state == lfg::LFG_STATE_NONE)
             return false;
 
@@ -2139,6 +2275,10 @@ bool RandomPlayerbotMgr::QueueBurstBotLfgNow(Player* bot, QueueBotReservation& r
     bot->GetSession()->QueuePacket(data);
     reservation.joinRequestedAt = now;
     ++queueBurstLfgJoinCount;
+
+    if (sPlayerbotAIConfig.queueAutoScaleDebug)
+        LOG_INFO("playerbots", "[QueueAutoScale] LFG join packet submitted: bot={}, dungeon={}, role={}",
+                 bot->GetGUID().ToString(), reservation.lfgDungeonId, roleMask);
 
     return true;
 }
@@ -2173,6 +2313,20 @@ bool RandomPlayerbotMgr::IsQueueBotBusy(Player* bot) const
     return state != lfg::LFG_STATE_NONE && state != lfg::LFG_STATE_FINISHED_DUNGEON;
 }
 
+bool RandomPlayerbotMgr::GetQueueBurstBg(Player const* bot, BattlegroundQueueTypeId& queueType,
+                                         BattlegroundBracketId& bracket) const
+{
+    if (!sPlayerbotAIConfig.queueAutoScale || !bot)
+        return false;
+    auto itr = queueBurstBots.find(bot->GetGUID().GetCounter());
+    if (itr == queueBurstBots.end() || !itr->second.bg ||
+        itr->second.bgQueueType == BATTLEGROUND_QUEUE_NONE)
+        return false;
+    queueType = itr->second.bgQueueType;
+    bracket = itr->second.bgBracket;
+    return true;
+}
+
 bool RandomPlayerbotMgr::IsQueueBurstBot(Player const* bot, bool forLfg, bool forBg) const
 {
     if (!bot)
@@ -2192,6 +2346,30 @@ bool RandomPlayerbotMgr::IsQueueBurstBot(Player const* bot, bool forLfg, bool fo
 
 void RandomPlayerbotMgr::CleanupOrphanedQueueGroups()
 {
+    // BG raids are faction-specific; a human on either team keeps both raids alive.
+    std::unordered_set<uint32> activeBattlegrounds;
+    for (Player* player : players)
+    {
+        if (!player || GetPlayerBot(player->GetGUID().GetCounter()))
+            continue;
+
+        if (Battleground* bg = player->GetBattleground())
+            activeBattlegrounds.insert(bg->GetInstanceID());
+
+        // Bots may enter before the human accepts the invitation.
+        for (uint8 slot = 0; slot < PLAYER_MAX_BATTLEGROUND_QUEUES; ++slot)
+        {
+            BattlegroundQueueTypeId queueTypeId = player->GetBattlegroundQueueTypeId(slot);
+            if (queueTypeId == BATTLEGROUND_QUEUE_NONE)
+                continue;
+
+            GroupQueueInfo groupInfo;
+            if (sBattlegroundMgr->GetBattlegroundQueue(queueTypeId)
+                    .GetPlayerGroupInfoData(player->GetGUID(), &groupInfo) && groupInfo.IsInvitedToBGInstanceGUID)
+                activeBattlegrounds.insert(groupInfo.IsInvitedToBGInstanceGUID);
+        }
+    }
+
     // Queue-created groups can survive after every real player has left.
     // Bots then keep group/instance slots occupied because grouped bots are
     // considered busy by the autoscale cleanup.
@@ -2212,6 +2390,12 @@ void RandomPlayerbotMgr::CleanupOrphanedQueueGroups()
         bool const isBgGroup = group->isBGGroup() || group->isBFGroup();
         if (!isLfgGroup && !isBgGroup)
             continue;
+
+        if (isBgGroup)
+        {
+            if (Battleground* bg = bot->GetBattleground(); bg && activeBattlegrounds.contains(bg->GetInstanceID()))
+                continue;
+        }
 
         uint32 const groupId = group->GetGUID().GetCounter();
         if (!processedGroups.insert(groupId).second)
@@ -2296,6 +2480,9 @@ void RandomPlayerbotMgr::CleanupOrphanedQueueGroups()
             auto reservationItr = queueBurstBots.find(botGuid);
             if (reservationItr != queueBurstBots.end())
             {
+                if (sPlayerbotAIConfig.queueAutoScaleDebug)
+                    LOG_INFO("playerbots", "[QueueAutoScale] Orphan cleanup: bot={}, group={}, LFG={}, BG={}",
+                             member->GetGUID().ToString(), groupGuid.ToString(), isLfgGroup, isBgGroup);
                 bool const restoreLfgLocks = reservationItr->second.lfg;
 
                 SetEventValue(botGuid, "add", 0, 0);
@@ -2346,6 +2533,11 @@ void RandomPlayerbotMgr::BalanceQueueBots()
         SetEventValue(guid, "randomize", 0, 0);
 
         bool const restoreLfgLocks = reservation.lfg && bot;
+
+        if (sPlayerbotAIConfig.queueAutoScaleDebug)
+            LOG_INFO("playerbots", "[QueueAutoScale] Idle cleanup: bot={}, idle={}s, online={}, "
+                     "population={}, normalLimit={}", ObjectGuid::Create<HighGuid::Player>(guid).ToString(),
+                     now - reservation.lastNeeded, bot != nullptr, currentBots.size(), sPlayerbotAIConfig.MaxRandomBots);
 
         // Offline reservations can be removed immediately. Online bots are
         // logged out by ProcessBot() on the next manager pass after add expires.
@@ -2437,6 +2629,8 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
     uint32 randomTime;
     if (!player)
     {
+        if (sPlayerbotAIConfig.queueAutoScaleDebug && queueBurstBots.contains(bot))
+            LOG_INFO("playerbots", "[QueueAutoScale] Login requested: bot={}", botGUID.ToString());
         AddPlayerBot(botGUID, 0);
         randomTime = urand(1, 2);
 
@@ -3726,6 +3920,14 @@ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
 
     auto qitr = queueBurstBots.find(bot->GetGUID().GetCounter());
 
+    if (sPlayerbotAIConfig.queueAutoScaleDebug && qitr != queueBurstBots.end())
+        LOG_INFO("playerbots", "[QueueAutoScale] Bot logged in: bot={}, name={}, team={}, level={}->{}, "
+                 "LFG={}, BG={}, dungeon={}, queue={}, bracket={}, age={}s",
+                 bot->GetGUID().ToString(), bot->GetName(), uint32(bot->GetTeamId()), bot->GetLevel(),
+                 qitr->second.targetLevel, qitr->second.lfg, qitr->second.bg, qitr->second.lfgDungeonId,
+                 uint32(qitr->second.bgQueueType), uint32(qitr->second.bgBracket),
+                 time(nullptr) - qitr->second.reservedAt);
+
     if (qitr != queueBurstBots.end() && qitr->second.targetLevel &&
         bot->GetLevel() != qitr->second.targetLevel)
     {
@@ -3762,8 +3964,13 @@ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
         }
     }
 
-    if (qitr != queueBurstBots.end() && qitr->second.lfg)
-        QueueBurstBotLfgNow(bot, qitr->second);
+    if (qitr != queueBurstBots.end())
+    {
+        // Give the initialized bot a full pending window to reach its queue.
+        qitr->second.readyAt = time(nullptr);
+        if (qitr->second.lfg)
+            QueueBurstBotLfgNow(bot, qitr->second);
+    }
 }
 
 void RandomPlayerbotMgr::OnPlayerLogin(Player* player)
@@ -3861,6 +4068,9 @@ void RandomPlayerbotMgr::OnPlayerLogin(Player* player)
 
 void RandomPlayerbotMgr::OnPlayerLoginError(uint32 bot)
 {
+    if (sPlayerbotAIConfig.queueAutoScaleDebug && queueBurstBots.contains(bot))
+        LOG_INFO("playerbots", "[QueueAutoScale] Login failed: bot={}, releasing reservation",
+                 ObjectGuid::Create<HighGuid::Player>(bot).ToString());
     SetEventValue(bot, "add", 0, 0);
     currentBots.erase(bot);
     queueBurstBots.erase(bot);

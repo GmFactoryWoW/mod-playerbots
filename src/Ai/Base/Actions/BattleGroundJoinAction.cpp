@@ -313,11 +313,11 @@ bool BGJoinAction::isUseful()
     bool const burstBot =
         sRandomPlayerbotMgr.IsQueueBurstBot(bot, false, true);
 
-    if (sPlayerbotAIConfig.queueAutoScaleBurstOnly && !burstBot)
+    if (sPlayerbotAIConfig.queueAutoScale && sPlayerbotAIConfig.queueAutoScaleBurstOnly && !burstBot)
         return false;
 
     // do not try if BG bots disabled
-    if (!sPlayerbotAIConfig.RandomBotJoinBG && !burstBot)
+    if (!sPlayerbotAIConfig.RandomBotJoinBG && !(sPlayerbotAIConfig.queueAutoScale && burstBot))
         return false;
 
     // can't queue while in BG/Arena
@@ -329,7 +329,7 @@ bool BGJoinAction::isUseful()
         return false;
 
     // Burst bots exist specifically to fill this queue: do not make them wait 120 s.
-    if ((time(nullptr) - bot->GetInGameTime()) < 120 && !burstBot)
+    if ((time(nullptr) - bot->GetInGameTime()) < 120 && !(sPlayerbotAIConfig.queueAutoScale && burstBot))
         return false;
 
     // check level
@@ -364,6 +364,18 @@ bool BGJoinAction::isUseful()
 
     bgList.clear();
     ratedList.clear();
+
+    BattlegroundQueueTypeId reservedQueue = BATTLEGROUND_QUEUE_NONE;
+    BattlegroundBracketId reservedBracket = BG_BRACKET_ID_FIRST;
+    if (sRandomPlayerbotMgr.GetQueueBurstBg(bot, reservedQueue, reservedBracket))
+    {
+        if (canJoinBg(reservedQueue, reservedBracket) && shouldJoinBg(reservedQueue, reservedBracket))
+        {
+            bgList.push_back(reservedQueue);
+            return true;
+        }
+        return false;
+    }
 
     for (int bracket = BG_BRACKET_ID_FIRST; bracket < MAX_BATTLEGROUND_BRACKETS; ++bracket)
     {
@@ -800,6 +812,11 @@ bool BGStatusAction::Execute(Event event)
     bool const burstBot =
         sRandomPlayerbotMgr.IsQueueBurstBot(bot, false, true);
 
+    if (sPlayerbotAIConfig.queueAutoScaleDebug && burstBot)
+        LOG_INFO("playerbots", "[QueueAutoScale] BG status: bot={}, team={}, slot={}, status={}, "
+                 "clientInstance={}, map={}, inBattleground={}", bot->GetGUID().ToString(),
+                 uint32(bot->GetTeamId()), QueueSlot, statusid, instanceId, mapId, bot->InBattleground());
+
     if (burstBot && statusid == STATUS_WAIT_JOIN)
     {
         BattlegroundQueueTypeId queueTypeId = bot->GetBattlegroundQueueTypeId(QueueSlot);
@@ -833,6 +850,10 @@ bool BGStatusAction::Execute(Event event)
         WorldPacket packet(CMSG_BATTLEFIELD_PORT, 20);
         packet << type << unk2 << uint32(bgTypeId) << unk << action;
         bot->GetSession()->QueuePacket(new WorldPacket(packet));
+
+        if (sPlayerbotAIConfig.queueAutoScaleDebug)
+            LOG_INFO("playerbots", "[QueueAutoScale] BG invitation acceptance submitted: bot={}, queue={}, type={}",
+                     bot->GetGUID().ToString(), uint32(queueTypeId), uint32(bgTypeId));
 
         botAI->ResetStrategies(false);
         context->GetValue<uint32>("bg role")->Set(urand(0, 9));
