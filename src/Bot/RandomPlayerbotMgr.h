@@ -12,6 +12,8 @@
 #include "ObjectGuid.h"
 #include "PlayerbotCommandServer.h"
 #include "PlayerbotMgr.h"
+#include <mutex>
+#include <set>
 #include "LFG.h"
 #include <unordered_map>
 #include <unordered_set>
@@ -278,6 +280,7 @@ private:
     void RandomTeleport(Player* bot);
     void RandomTeleport(Player* bot, std::vector<WorldLocation>& locs, bool hearth = false);
     uint32 GetZoneLevel(uint16 mapId, float teleX, float teleY, float teleZ);
+    void UpdatePlayerZones();
     std::vector<WorldLocation> GetPlayerZoneTeleportLocations(std::vector<WorldLocation> const& locs, Player* bot);
     typedef void (RandomPlayerbotMgr::*ConsoleCommandHandler)(Player*);
     std::vector<Player*> players;
@@ -292,6 +295,9 @@ private:
     time_t queueBurstLfgJoinWindow = 0;
     uint32 queueBurstLfgJoinCount = 0;
     uint32 playersLevel;
+    // Written on the world thread, read from map threads.
+    std::set<std::pair<uint32, uint32>> _playerZones;
+    std::mutex _playerZonesLock;
 
     // Account lists
     std::vector<uint32> rndBotTypeAccounts;             // Accounts marked as RNDbot (type 1)
