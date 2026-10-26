@@ -39,13 +39,21 @@ enum DenyReason
     PLAYERBOT_DENY_LFG
 };
 
+enum class PlayerbotSecurityContext
+{
+    Group,
+    Guild
+};
+
 class PlayerbotSecurity
 {
 public:
     PlayerbotSecurity(Player* const bot);
 
-    PlayerbotSecurityLevel LevelFor(Player* from, DenyReason* reason = nullptr, bool ignoreGroup = false);
-    bool CheckLevelFor(PlayerbotSecurityLevel level, bool silent, Player* from, bool ignoreGroup = false);
+    PlayerbotSecurityLevel LevelFor(Player* from, DenyReason* reason = nullptr, bool ignoreGroup = false,
+                                   PlayerbotSecurityContext context = PlayerbotSecurityContext::Group);
+    bool CheckLevelFor(PlayerbotSecurityLevel level, bool silent, Player* from, bool ignoreGroup = false,
+                       PlayerbotSecurityContext context = PlayerbotSecurityContext::Group);
 
 private:
     Player* const bot;

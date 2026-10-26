@@ -15,7 +15,8 @@ PlayerbotSecurity::PlayerbotSecurity(Player* const bot) : bot(bot)
         account = sCharacterCache->GetCharacterAccountIdByGuid(bot->GetGUID());
 }
 
-PlayerbotSecurityLevel PlayerbotSecurity::LevelFor(Player* from, DenyReason* reason, bool ignoreGroup)
+PlayerbotSecurityLevel PlayerbotSecurity::LevelFor(Player* from, DenyReason* reason, bool ignoreGroup,
+                                                 PlayerbotSecurityContext context)
 {
     // Basic pointer validity checks
     if (!bot || !from || !from->GetSession())
@@ -39,7 +40,13 @@ PlayerbotSecurityLevel PlayerbotSecurity::LevelFor(Player* from, DenyReason* rea
         return PLAYERBOT_SECURITY_DENY_ALL;
     }
 
-    if (botAI->IsOpposing(from))
+    Group* fromGroup = from->GetGroup();
+    Group* botGroup = bot->GetGroup();
+    bool const allowCrossFaction = sWorld->getBoolConfig(context == PlayerbotSecurityContext::Guild
+                                                           ? CONFIG_ALLOW_TWO_SIDE_INTERACTION_GUILD
+                                                           : CONFIG_ALLOW_TWO_SIDE_INTERACTION_GROUP);
+
+    if (botAI->IsOpposing(from) && !allowCrossFaction)
     {
         if (reason)
             *reason = PLAYERBOT_DENY_OPPOSING;
@@ -49,23 +56,11 @@ PlayerbotSecurityLevel PlayerbotSecurity::LevelFor(Player* from, DenyReason* rea
 
     if (sPlayerbotAIConfig.IsInRandomAccountList(account))
     {
-        // (duplicate check in case of faction change)
-        if (botAI->IsOpposing(from))
-        {
-            if (reason)
-                *reason = PLAYERBOT_DENY_OPPOSING;
-
-            return PLAYERBOT_SECURITY_DENY_ALL;
-        }
-
         // In a BG random bots have no master and the team shares one raid, so the group check denies everyone
         if (sPlayerbotAIConfig.AllowBattlegroundCommands && !ignoreGroup && !botAI->HasGameClientMaster() &&
             bot->InBattleground() && bot->GetBattlegroundId() == from->GetBattlegroundId() &&
             bot->GetBgTeamId() == from->GetBgTeamId() && (IsRealPlayer(from) || IsSelfBot(from)))
             return PLAYERBOT_SECURITY_ALLOW_ALL;
-
-        Group* fromGroup = from->GetGroup();
-        Group* botGroup = bot->GetGroup();
 
         if (fromGroup && botGroup && fromGroup == botGroup && !ignoreGroup)
         {
@@ -172,14 +167,15 @@ PlayerbotSecurityLevel PlayerbotSecurity::LevelFor(Player* from, DenyReason* rea
     return PLAYERBOT_SECURITY_INVITE;
 }
 
-bool PlayerbotSecurity::CheckLevelFor(PlayerbotSecurityLevel level, bool silent, Player* from, bool ignoreGroup)
+bool PlayerbotSecurity::CheckLevelFor(PlayerbotSecurityLevel level, bool silent, Player* from, bool ignoreGroup,
+                                     PlayerbotSecurityContext context)
 {
     // If something is wrong with the pointers, we silently refuse
     if (!bot || !from || !from->GetSession())
         return false;
 
     DenyReason reason = PLAYERBOT_DENY_NONE;
-    PlayerbotSecurityLevel realLevel = LevelFor(from, &reason, ignoreGroup);
+    PlayerbotSecurityLevel realLevel = LevelFor(from, &reason, ignoreGroup, context);
 
     if (realLevel >= level || from == bot)
         return true;
@@ -193,7 +189,9 @@ bool PlayerbotSecurity::CheckLevelFor(PlayerbotSecurityLevel level, bool silent,
         return false;
 
     Player* master = botAI->GetMaster();
-    if (master && botAI->IsOpposing(master))
+    bool const crossFactionGroup = master && bot->GetGroup() && bot->GetGroup() == master->GetGroup() &&
+                                   sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_GROUP);
+    if (master && botAI->IsOpposing(master) && !crossFactionGroup)
         if (master->GetSession() && !master->CanBeGameMaster())
             return false;
 

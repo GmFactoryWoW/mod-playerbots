@@ -39,7 +39,8 @@ bool GuildAcceptAction::Execute(Event event)
             "guild_accept_already_in_guild", "Sorry, I am in a guild already", {}));
         accept = false;
     }
-    else if (!botAI->GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_INVITE, false, inviter, true))
+    else if (!botAI->GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_INVITE, false, inviter, true,
+                                                PlayerbotSecurityContext::Guild))
     {
         botAI->TellError(PlayerbotTextMgr::instance().GetBotTextOrDefault(
             "guild_accept_declined", "Sorry, I don't want to join your guild :(", {}));
