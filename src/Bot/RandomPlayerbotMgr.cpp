@@ -1639,8 +1639,6 @@ void RandomPlayerbotMgr::CheckLfgQueue()
                 TeamDemand& td = demand[key];
 
                 ++td.total;
-                td.minLevel = td.minLevel ? std::min<uint8>(td.minLevel, player->GetLevel()) : player->GetLevel();
-                td.maxLevel = std::max<uint8>(td.maxLevel, player->GetLevel());
 
                 if (roles & lfg::PLAYER_ROLE_TANK)
                     ++td.tanks;
@@ -1677,10 +1675,11 @@ void RandomPlayerbotMgr::CheckLfgQueue()
                 }
                 else
                 {
-                    uint8 dungeonMin = dungeon->minlevel ? dungeon->minlevel : player->GetLevel();
-                    uint8 dungeonMax = dungeon->maxlevel ? dungeon->maxlevel : player->GetLevel();
-                    td.minLevel = td.minLevel ? std::min<uint8>(td.minLevel, dungeonMin) : dungeonMin;
-                    td.maxLevel = std::max<uint8>(td.maxLevel, dungeonMax);
+                    // Match the level limits enforced by QueueBurstBotLfgNow, not the players' levels.
+                    td.minLevel = dungeon->minlevel ? dungeon->minlevel : player->GetLevel();
+                    td.maxLevel = dungeon->maxlevel ? dungeon->maxlevel : player->GetLevel();
+                    if (dungeon->type == lfg::LFG_TYPE_DUNGEON)
+                        td.maxLevel = std::min<uint32>(td.maxLevel, uint32(dungeon->minlevel) + 10);
                 }
 
                 // Keep the legacy list populated for non-burst code paths.
