@@ -510,7 +510,15 @@ void PlayerbotAI::UpdateAIGroupMaster()
     if (master)
         masterBotAI = GET_PLAYERBOT_AI(master);
 
-    if (!master || (masterBotAI && !IsSelfBot(master)))
+    bool leaderChanged = false;
+    if (group->isLFGGroup() && !bot->InBattleground() && !IsSelfBot(bot) &&
+        (!master || master->GetGUID() != group->GetLeaderGUID()))
+    {
+        Player* leader = GetGroupLeader();
+        leaderChanged = leader && (IsRealPlayer(leader) || IsSelfBot(leader));
+    }
+
+    if (!master || (masterBotAI && !IsSelfBot(master)) || leaderChanged)
     {
         Player* newMaster = FindNewMaster();
         if (newMaster)
