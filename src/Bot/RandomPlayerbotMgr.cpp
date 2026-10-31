@@ -1922,6 +1922,15 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
     if (!count || currentBots.size() >= sPlayerbotAIConfig.queueAutoScaleMaxBots)
         return 0;
 
+    if (!forLfg)
+    {
+        minLevel = std::max<uint8>(minLevel, sPlayerbotAIConfig.RandomBotMinLevel);
+        maxLevel = std::min<uint8>(maxLevel, sPlayerbotAIConfig.RandomBotMaxLevel);
+    }
+
+    maxLevel = std::min<uint32>(maxLevel, sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL));
+    minLevel = std::min(minLevel, maxLevel);
+
     bool const allowAnyFaction =
         forLfg && sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_GROUP) &&
         sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_CHAT);
@@ -2025,14 +2034,6 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
     }
 
     count -= pending;
-
-    if (!forLfg)
-    {
-        minLevel = std::max<uint8>(minLevel, sPlayerbotAIConfig.RandomBotMinLevel);
-        maxLevel = std::min<uint8>(maxLevel, sPlayerbotAIConfig.RandomBotMaxLevel);
-        if (minLevel > maxLevel)
-            std::swap(minLevel, maxLevel);
-    }
 
     uint8 const targetLevel = static_cast<uint8>((static_cast<uint32>(minLevel) + maxLevel) / 2);
     bool const excludeDeathKnights = sPlayerbotAIConfig.DisableDeathKnightLogin ||
@@ -3976,18 +3977,24 @@ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
 
             PlayerbotFactory::InitTalentsBySpecNo(bot, specNo, true);
 
+            // Role filters use AI strategies, which must match the new talents.
+            if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+                ai->ResetStrategies();
+
             PlayerbotFactory factory(bot, bot->GetLevel());
-            factory.InitEquipment(false, true);
             factory.InitGlyphs(false);
             bot->SendTalentsInfoData(false);
-
-            if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
-                ai->Reset();
         }
     }
 
     if (qitr != queueBurstBots.end())
     {
+        // Refresh gear even when the bot already had the reserved level.
+        PlayerbotFactory::AutoGear(bot, 0, 0, false, true);
+
+        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+            ai->Reset();
+
         // Give the initialized bot a full pending window to reach its queue.
         qitr->second.readyAt = time(nullptr);
         if (qitr->second.lfg)

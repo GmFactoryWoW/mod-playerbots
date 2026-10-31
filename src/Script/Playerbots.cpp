@@ -18,8 +18,10 @@
 #include "AllMapScript.h"
 #include "GatherNodeMgr.h"
 #include "GlobalScript.h"
+#include "Group.h"
 #include "GuildTaskMgr.h"
 #include "LFG.h"
+#include "LFGMgr.h"
 #include "PlayerScript.h"
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotCommandScript.h"
@@ -31,6 +33,7 @@
 #include "ServerScript.h"
 #include "SessionScript.h"
 #include "WorldScript.h"
+#include <algorithm>
 #include "cmath"
 
 class PlayerbotsDatabaseScript : public DatabaseScript
@@ -141,8 +144,52 @@ public:
         PLAYERHOOK_CAN_PLAYER_USE_GUILD_CHAT,
         PLAYERHOOK_CAN_PLAYER_USE_CHANNEL_CHAT,
         PLAYERHOOK_ON_GIVE_EXP,
-        PLAYERHOOK_ON_BEFORE_TELEPORT
+        PLAYERHOOK_ON_BEFORE_TELEPORT,
+        PLAYERHOOK_NOT_AVOID_SATISFY
     }) {}
+
+    bool OnPlayerNotAvoidSatisfy(Player* player, DungeonProgressionRequirements const* requirements,
+                                uint32 targetMap, bool /*report*/) override
+    {
+        if (!player || !requirements || !sRandomPlayerbotMgr.IsQueueBurstBot(player, true, false))
+            return true;
+
+        Group* group = player->GetGroup();
+        if (!group || !group->isLFGGroup())
+            return true;
+
+        lfg::LFGDungeonData const* dungeon = sLFGMgr->GetLFGDungeon(sLFGMgr->GetDungeon(group->GetGUID()));
+        if (!dungeon || dungeon->map != targetMap)
+            return true;
+
+        DungeonProgressionRequirements filtered = *requirements;
+        auto removePersonalRequirements = [](auto& entries)
+        {
+            entries.erase(std::remove_if(entries.begin(), entries.end(), [](ProgressionRequirement const* entry)
+            {
+                return !entry->checkLeaderOnly;
+            }), entries.end());
+        };
+        removePersonalRequirements(filtered.quests);
+        removePersonalRequirements(filtered.items);
+        removePersonalRequirements(filtered.achievements);
+
+        // The filtered recheck can invoke this hook again; stop once nothing can be removed.
+        if (filtered.quests.size() == requirements->quests.size() &&
+            filtered.items.size() == requirements->items.size() &&
+            filtered.achievements.size() == requirements->achievements.size())
+            return true;
+
+        // Keep core level, item-level and leader requirements without changing quest progress.
+        if (!player->Satisfy(&filtered, targetMap, false))
+            return true;
+
+        if (sPlayerbotAIConfig.queueAutoScaleDebug)
+            LOG_INFO("playerbots", "[QueueAutoScale] LFG access: bot={} dungeon={} map={} attunement bypassed",
+                     player->GetGUID().ToString(), dungeon->id, targetMap);
+
+        return false;
+    }
 
     void OnPlayerLogin(Player* player) override
     {
