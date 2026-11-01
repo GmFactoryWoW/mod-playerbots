@@ -70,6 +70,7 @@
 #        LOGS
 #    DEPRECATED (TEMPORARY)
 #    QUEUE AUTOSCALE / BURST
+#    EVENTS
 ####################################################################################################
 
 ###################################
@@ -2809,3 +2810,11 @@ AiPlayerbot.QueueAutoScaleIdleSeconds = 60
 # before the reservation is considered stuck and replaced.
 AiPlayerbot.QueueAutoScalePendingSeconds = 60
 AiPlayerbot.QueueAutoScaleLFGJoinBatch = 8
+
+####################################################################################################
+# EVENTS
+####################################################################################################
+
+# Enable bot participation in nearby Hallow's End firefighting events.
+# Default: 0 (disabled).
+Playerbots.HallowsEnd.Enabled = 0

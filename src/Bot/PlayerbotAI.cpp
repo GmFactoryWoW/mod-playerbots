@@ -5,6 +5,12 @@
  */
 
 #include "PlayerbotAI.h"
+
+#include <cmath>
+#include <mutex>
+#include <sstream>
+#include <string>
+
 #include "AiFactory.h"
 #include "BudgetValues.h"
 #include "ChannelMgr.h"
@@ -21,6 +27,7 @@
 #include "GameObjectData.h"
 #include "GameTime.h"
 #include "GuildMgr.h"
+#include "HallowsEndStrategy.h"
 #include "LFGMgr.h"
 #include "LastMovementValue.h"
 #include "LastSpellCastValue.h"
@@ -55,10 +62,6 @@
 #include "Unit.h"
 #include "UpdateTime.h"
 #include "Vehicle.h"
-#include <cmath>
-#include <mutex>
-#include <sstream>
-#include <string>
 
 namespace
 {
@@ -4910,6 +4913,12 @@ bool PlayerbotAI::AllowActive(ActivityType activityType)
 
 bool PlayerbotAI::AllowActivity(ActivityType activityType, bool checkNow)
 {
+    // Local event participation must survive the loss of a real-player master.
+    if ((activityType == ALL_ACTIVITY || activityType == DETAILED_MOVE_ACTIVITY || activityType == PARTY_ACTIVITY ||
+         activityType == REACT_ACTIVITY) &&
+        IsHallowsEndActive(this))
+        return true;
+
     const int activityIndex = static_cast<int>(activityType);
 
     if (!allowActiveCheckTimer[activityIndex])
@@ -6739,6 +6748,9 @@ std::set<uint32> PlayerbotAI::GetCurrentIncompleteQuestIds()
 uint32 PlayerbotAI::GetReactDelay()
 {
     uint32 base = sPlayerbotAIConfig.ReactDelay;  // Default 100(ms)
+
+    if (IsHallowsEndActive(this))
+        return base;
 
     // If dynamic react delay is disabled, use a static calculation
     if (!sPlayerbotAIConfig.DynamicReactDelay)

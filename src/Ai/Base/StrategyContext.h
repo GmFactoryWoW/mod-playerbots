@@ -27,6 +27,7 @@
 #include "GroupStrategy.h"
 #include "GuardStrategy.h"
 #include "GuildStrategy.h"
+#include "HallowsEndStrategy.h"
 #include "KiteStrategy.h"
 #include "LfgStrategy.h"
 #include "LootNonCombatStrategy.h"
@@ -62,6 +63,7 @@ class StrategyContext : public NamedObjectContext<Strategy>
 public:
     StrategyContext()
     {
+        creators["hallows end"] = [](PlayerbotAI* botAI) -> Strategy* { return new HallowsEndStrategy(botAI); };
         creators["racials"] = &StrategyContext::racials;
         creators["loot"] = &StrategyContext::loot;
         creators["gather"] = &StrategyContext::gather;

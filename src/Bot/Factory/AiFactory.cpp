@@ -507,6 +507,9 @@ Engine* AiFactory::createCombatEngine(Player* player, PlayerbotAI* const facade,
 
 void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const facade, Engine* nonCombatEngine)
 {
+    if (sPlayerbotAIConfig.HallowsEndEnabled)
+        nonCombatEngine->addStrategy("hallows end", false);
+
     uint8 tab = GetPlayerSpecTab(player);
 
     switch (player->getClass())

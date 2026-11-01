@@ -12,6 +12,7 @@
 #include "FishingTriggers.h"
 #include "GenericTriggers.h"
 #include "GuildTriggers.h"
+#include "HallowsEndStrategy.h"
 #include "HealthTriggers.h"
 #include "LfgTriggers.h"
 #include "LootTriggers.h"
@@ -34,6 +35,7 @@ class TriggerContext : public NamedObjectContext<Trigger>
 public:
     TriggerContext()
     {
+        creators["hallows end fires"] = [](PlayerbotAI* botAI) -> Trigger* { return new HallowsEndTrigger(botAI); };
         creators["return"] = &TriggerContext::_return;
         creators["sit"] = &TriggerContext::sit;
         creators["return to stay position"] = &TriggerContext::return_to_stay_position;

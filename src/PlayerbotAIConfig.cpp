@@ -81,6 +81,7 @@ bool PlayerbotAIConfig::Initialize()
     LOG_INFO("server.loading", "Initializing mod-playerbots, based on AI Playerbots by ike3 and the original Playerbots by blueboy");
 
     Enabled = sConfigMgr->GetOption<bool>("Playerbots.Enabled", true);
+    HallowsEndEnabled = sConfigMgr->GetOption<bool>("Playerbots.HallowsEnd.Enabled", false);
     if (!Enabled)
     {
         LOG_INFO("server.loading", "Playerbots Module is disabled in playerbots.conf");

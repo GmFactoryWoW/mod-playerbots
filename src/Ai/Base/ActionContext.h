@@ -35,6 +35,7 @@
 #include "GuildAcceptAction.h"
 #include "GuildCreateActions.h"
 #include "GuildManagementActions.h"
+#include "HallowsEndStrategy.h"
 #include "ImbueAction.h"
 #include "InviteToGroupAction.h"
 #include "LeaveGroupAction.h"
@@ -78,6 +79,9 @@ class ActionContext : public NamedObjectContext<Action>
 public:
     ActionContext()
     {
+        creators["hallows end water"] = [](PlayerbotAI* botAI) -> Action* { return new HallowsEndWaterAction(botAI); };
+        creators["hallows end extinguish"] = [](PlayerbotAI* botAI) -> Action*
+        { return new HallowsEndExtinguishAction(botAI); };
         creators["mark rti"] = &ActionContext::mark_rti;
         creators["set return position"] = &ActionContext::set_return_position;
         creators["rpg"] = &ActionContext::rpg;

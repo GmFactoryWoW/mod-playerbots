@@ -35,6 +35,7 @@
 #include "GroupLeaderValue.h"
 #include "GroupValues.h"
 #include "GuildValues.h"
+#include "HallowsEndStrategy.h"
 #include "HasAvailableLootValue.h"
 #include "HasTotemValue.h"
 #include "InvalidTargetValue.h"
@@ -103,6 +104,8 @@ class ValueContext : public NamedObjectContext<UntypedValue>
 public:
     ValueContext()
     {
+        creators["hallows end active"] = [](PlayerbotAI* botAI) -> UntypedValue*
+        { return new HallowsEndActiveValue(botAI); };
         creators["active spell"] = &ValueContext::active_spell;
         creators["craft"] = &ValueContext::craft;
         creators["collision"] = &ValueContext::collision;
