@@ -9,6 +9,7 @@
 #include "ArenaTeamMgr.h"
 #include "BattlegroundMgr.h"
 #include "Event.h"
+#include "GameTime.h"
 #include "GroupMgr.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotOperations.h"
@@ -16,6 +17,11 @@
 #include "Playerbots.h"
 #include "PositionValue.h"
 #include "RandomPlayerbotFactory.h"
+
+namespace
+{
+    constexpr uint32 BG_JOIN_LOGIN_DELAY_MS = 120 * IN_MILLISECONDS;
+}
 
 bool BGJoinAction::Execute(Event /*event*/)
 {
@@ -338,6 +344,10 @@ bool BGJoinAction::isUseful()
 
     // Burst bots exist specifically to fill this queue: do not make them wait 120 s.
     if ((time(nullptr) - bot->GetInGameTime()) < 120 && !(sPlayerbotAIConfig.queueAutoScale && burstBot))
+        return false;
+
+    // do not try right after login
+    if (getMSTimeDiff(bot->GetInGameTime(), GameTime::GetGameTimeMS().count()) < BG_JOIN_LOGIN_DELAY_MS)
         return false;
 
     // check level
