@@ -2306,10 +2306,10 @@ uint32 RandomPlayerbotMgr::EnsureQueueBots(TeamId team, uint8 minLevel, uint8 ma
         if (added >= wanted)
             break;
 
-        SetEventValue(c.guid, "add", 1, sPlayerbotAIConfig.PermanentlyInWorldTime);
+        SetEventValue(c.guid, "add", 1, YEAR);
         SetEventValue(c.guid, "logout", 0, 0);
         // Keep the selected role/spec stable for the lifetime of the burst bot.
-        SetEventValue(c.guid, "randomize", 1, sPlayerbotAIConfig.PermanentlyInWorldTime);
+        SetEventValue(c.guid, "randomize", 1, YEAR);
         currentBots.insert(c.guid);
 
         QueueBotReservation reservation;
